@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+pydantic
+pandas
+openpyxl
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.7.1+cpu
+torchvision==0.22.1+cpu
+ultralytics
+opencv-python-headless
+python-multipart
+pydantic-settings
+sqlalchemy
+pytest
+httpx

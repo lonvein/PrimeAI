@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+*.db
+backend/static/debug/*
+ml/weights/*.pt
+frontend/node_modules/
+frontend/dist/
+.ipynb_checkpoints/

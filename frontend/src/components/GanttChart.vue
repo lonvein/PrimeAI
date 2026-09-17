@@ -1,0 +1,1 @@
+<template><div aria-label="Gantt chart">График СМР будет отображён после загрузки расписания.</div></template>

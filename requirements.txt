@@ -1,0 +1,71 @@
+# ==============================================================
+# Deep Learning Environment — requirements.txt
+# Установка: pip install -r requirements.txt
+# ==============================================================
+
+# ── Core Deep Learning Frameworks ─────────────────────────────
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+torch==2.10.0+cu128
+torchvision==0.25.0+cu128
+torchaudio==2.11.0+cu128
+
+# tensorflow         # TensorFlow (раскомментируй при необходимости)
+# keras           # Высокоуровневый API (входит в TF 2.x)
+
+# ── Scientific Stack ───────────────────────────────────────────
+numpy
+scipy
+pandas
+scikit-learn
+
+# ── Visualization ──────────────────────────────────────────────
+matplotlib
+seaborn
+plotly
+ipywidgets
+
+# ── Jupyter & Notebooks ────────────────────────────────────────
+jupyter
+jupyterlab
+notebook
+ipykernel
+
+# ── Computer Vision ────────────────────────────────────────────
+opencv-python        # OpenCV
+Pillow            # PIL — работа с изображениями
+albumentations        # Аугментации для CV
+timm             # PyTorch Image Models (EfficientNet, ViT, etc.)
+
+# ── NLP & Text ─────────────────────────────────────────────────
+transformers         # HuggingFace Transformers (BERT, GPT, etc.)
+tokenizers          # Быстрые токенизаторы HuggingFace
+datasets           # HuggingFace Datasets
+sentencepiece        # Токенизатор для many LLMs
+nltk
+gensim
+
+# ── Model Training Utilities ───────────────────────────────────
+tqdm                 # Прогресс-бары
+tensorboard          # Визуализация обучения
+wandb                # Weights & Biases (логирование экспериментов)
+accelerate           # HuggingFace Accelerate (multi-GPU, mixed precision)
+
+# ── Data Utilities ─────────────────────────────────────────────
+h5py                 # HDF5 файлы
+pyarrow              # Columnar data (Parquet и т.д.)
+requests
+wget
+
+# ── Utilities ──────────────────────────────────────────────────
+pyyaml               # YAML конфиги
+python-dotenv        # Переменные окружения из .env
+einops               # Операции с тензорами (rearrange, repeat)
+jupytext             # Синхронизация .ipynb и .py файлов
+
+# ── Для работы с текстом ───────────────────────────────
+rapidfuzz==3.14.5
+pyspellchecker==0.9.0
+pymorphy3==2.0.6
+notebook
+

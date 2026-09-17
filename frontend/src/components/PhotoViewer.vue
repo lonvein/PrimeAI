@@ -1,0 +1,1 @@
+<template><div aria-label="Photo viewer">Снимок появится после анализа.</div></template>

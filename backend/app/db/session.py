@@ -1,0 +1,25 @@
+"""SQLAlchemy engine and session factory."""
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import DeclarativeBase, sessionmaker
+
+from ..core.config import get_settings
+
+settings = get_settings()
+connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
+engine = create_engine(settings.database_url, connect_args=connect_args)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+
+class Base(DeclarativeBase):
+    """Base class for application ORM models."""
+
+
+def get_db():
+    """Yield and close one request-scoped database session."""
+
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
