@@ -10,3 +10,4 @@ ml/notebooks
 MSC_lct
 data/raw_photos
 *.ipynb_checkpoints
+.env
