@@ -1,15 +1,16 @@
 fastapi
 uvicorn[standard]
 pydantic
+pydantic-settings
 pandas
 openpyxl
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.7.1+cpu
-torchvision==0.22.1+cpu
+torch
+torchvision
 ultralytics
 opencv-python-headless
 python-multipart
-pydantic-settings
 sqlalchemy
+# Testing
 pytest
 httpx

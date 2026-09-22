@@ -6,9 +6,14 @@ services:
     ports:
       - "8000:8000"
     environment:
-      YOLO_WEIGHTS: /app/ml/weights/best_yolo11x_construction.pt
+      # Points to the weights path INSIDE the container.
+      # Dockerfile copies backend/models/best.pt → /app/backend/models/best.pt
+      YOLO_WEIGHTS: /app/backend/models/best.pt
+      DATABASE_URL: "sqlite:////app/data/build_eye.db"
+      STATIC_DIR: /app/backend/static
     volumes:
       - backend_static:/app/backend/static
+      - backend_data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
       interval: 10s
@@ -27,3 +32,4 @@ services:
 
 volumes:
   backend_static:
+  backend_data:
