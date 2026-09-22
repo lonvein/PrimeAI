@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -43,6 +44,20 @@ class IncidentStatus(str, Enum):
     CRITICAL = "CRITICAL"
 
 
+class ObservationQuality(str, Enum):
+    """How reliable is the detection result for compliance judgement.
+
+    HIGH   — real model loaded, multiple detections found.
+    MEDIUM — real model loaded, but no domain classes detected
+             (model may be pre-COCO; absence does not mean violation).
+    LOW    — synthetic fallback active (weights missing).
+    """
+
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+
+
 class AnalyzeResponse(BaseModel):
     """Complete result of image detection and stage compliance analysis."""
 
@@ -53,3 +68,39 @@ class AnalyzeResponse(BaseModel):
     explanation: str
     missing_machinery: list[str]
     unexpected_machinery: list[str]
+    # NEW: tells the frontend (and the user) how reliable the result is.
+    observation_quality: ObservationQuality = ObservationQuality.MEDIUM
+    # NEW: indicates whether the model is fine-tuned for construction or generic COCO.
+    model_is_construction_specific: bool = False
+    # NEW: optional URL of the annotated debug image saved by the backend.
+    debug_image_url: str | None = None
+
+
+class ScheduleRow(BaseModel):
+    """One row from the uploaded Excel schedule."""
+
+    index: int
+    stage_name: str
+    zone: str | None = None
+    date_start: datetime | None = None
+    date_end: datetime | None = None
+    days: int | None = None
+    machinery_plan: str | None = None  # raw text from Excel
+    required_machinery: dict[str, int] = Field(default_factory=dict)  # parsed
+    contractor: str | None = None
+
+
+class ScheduleUploadResponse(BaseModel):
+    """Response for schedule upload endpoint."""
+
+    filename: str
+    rows: list[ScheduleRow]
+    active_stage: ScheduleRow | None = None  # stage active as of query date
+
+
+class AnalyticsSummary(BaseModel):
+    """Real analytics summary derived from persisted incidents."""
+
+    total_incidents: int
+    by_status: dict[str, int]
+    recent_incidents: list[dict[str, Any]] = Field(default_factory=list)

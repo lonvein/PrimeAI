@@ -11,8 +11,11 @@ class Settings(BaseSettings):
 
     app_name: str = "Build Eye AI"
     debug: bool = True
+    # Default points to the actual file that exists.
+    # Override via .env: YOLO_WEIGHTS=ml/weights/best_construction.pt
     database_url: str = "sqlite:///./build_eye.db"
-    yolo_weights: Path = Path("ml/weights/baseline_yolov8m.pt")
+    yolo_weights: Path = Path("backend/models/best.pt")
+    yolo_confidence: float = 0.25
     static_dir: Path = Path("backend/static")
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -22,4 +25,4 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return one cached settings instance for the process."""
 
-    return Settings()
+    return Settings()
