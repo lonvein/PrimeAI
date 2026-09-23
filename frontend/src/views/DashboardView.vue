@@ -4,11 +4,17 @@ import Navbar from '../components/Navbar.vue'
 import IncidentCard from '../components/IncidentCard.vue'
 import UploadModal from '../components/UploadModal.vue'
 import PhotoViewer from '../components/PhotoViewer.vue'
+import GanttChart from '../components/GanttChart.vue'
 import { api } from '../services/api'
 
 const analysis = ref(null)
 const localFile = ref(null)
 const analytics = ref(null)
+const scheduleRows = ref([])
+const activeStageName = ref('')
+const scheduleFile = ref(null)
+const scheduleLoading = ref(false)
+const scheduleError = ref('')
 
 async function loadAnalytics() {
   try {
@@ -21,11 +27,35 @@ async function loadAnalytics() {
 
 function handleAnalyzed(result) {
   localFile.value = result._localFile || null
-  // Remove the non-API field before storing.
   const { _localFile, ...apiData } = result
   analysis.value = apiData
-  // Refresh analytics after new analysis.
   loadAnalytics()
+}
+
+async function uploadSchedule() {
+  if (!scheduleFile.value) return
+  scheduleLoading.value = true
+  scheduleError.value = ''
+  const formData = new FormData()
+  formData.append('file', scheduleFile.value)
+  // Pass today's date to get active stage.
+  const today = new Date().toISOString().slice(0, 10)
+  try {
+    const { data } = await api.post(`/schedule/upload?query_date=${today}`, formData)
+    scheduleRows.value = data.rows || []
+    if (data.active_stage) {
+      activeStageName.value = data.active_stage.stage_name
+    }
+  } catch (e) {
+    scheduleError.value = e.response?.data?.detail || 'Не удалось загрузить расписание.'
+  } finally {
+    scheduleLoading.value = false
+  }
+}
+
+function selectSchedule(event) {
+  scheduleFile.value = event.target.files[0] || null
+  scheduleError.value = ''
 }
 
 onMounted(loadAnalytics)
@@ -61,8 +91,33 @@ onMounted(loadAnalytics)
         </div>
       </div>
 
-      <!-- Upload form -->
-      <UploadModal @analyzed="handleAnalyzed" />
+      <!-- Schedule upload section -->
+      <div class="section-card">
+        <h2>📅 Загрузка расписания работ</h2>
+        <p class="hint">Загрузите Excel-файл с графиком строительных работ (ДГП формат).</p>
+        <div class="schedule-upload-row">
+          <input type="file" accept=".xlsx,.xls" @change="selectSchedule" />
+          <button @click="uploadSchedule" :disabled="!scheduleFile || scheduleLoading">
+            {{ scheduleLoading ? 'Загрузка...' : '📊 Загрузить расписание' }}
+          </button>
+        </div>
+        <p v-if="scheduleError" class="error">{{ scheduleError }}</p>
+        <p v-if="activeStageName" class="active-stage-note">
+          Активный этап сегодня: <strong>{{ activeStageName }}</strong>
+        </p>
+      </div>
+
+      <!-- Gantt chart -->
+      <GanttChart
+        :rows="scheduleRows"
+        :active-stage-name="activeStageName"
+      />
+
+      <!-- Photo analysis section -->
+      <div class="section-card">
+        <h2>📸 Анализ снимка площадки</h2>
+        <UploadModal @analyzed="handleAnalyzed" />
+      </div>
 
       <!-- Photo with bounding boxes -->
       <PhotoViewer
@@ -80,6 +135,19 @@ onMounted(loadAnalytics)
         :observation-quality="analysis?.observation_quality || ''"
         :model-is-construction-specific="analysis?.model_is_construction_specific || false"
       />
+
+      <!-- Recent incidents from DB -->
+      <div v-if="analytics?.recent_incidents?.length" class="section-card recent-section">
+        <h2>📋 Последние проверки</h2>
+        <div v-for="inc in analytics.recent_incidents" :key="inc.id" class="recent-item" :class="inc.status.toLowerCase()">
+          <div class="recent-header">
+            <span class="recent-status">{{ inc.status }}</span>
+            <span class="recent-stage">{{ inc.stage_name }}</span>
+            <span class="recent-date">{{ new Date(inc.created_at).toLocaleString('ru-RU') }}</span>
+          </div>
+          <p class="recent-explanation">{{ inc.explanation }}</p>
+        </div>
+      </div>
     </section>
   </main>
 </template>
@@ -104,6 +172,53 @@ onMounted(loadAnalytics)
   font: 1.1rem/1.4 sans-serif;
   margin: 0 0 1.5rem;
   color: #555;
+}
+
+/* Section cards */
+.section-card {
+  margin-top: 1.5rem;
+  padding: 1.5rem;
+  background: white;
+  border-radius: 10px;
+  font-family: sans-serif;
+}
+.section-card h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.15rem;
+}
+.hint {
+  font-size: 0.85rem;
+  color: #777;
+  margin: 0 0 1rem;
+}
+
+/* Schedule upload */
+.schedule-upload-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.schedule-upload-row button {
+  cursor: pointer;
+  border: 0;
+  background: #18312b;
+  color: white;
+  border-radius: 6px;
+  font-weight: 700;
+  font-size: 0.9rem;
+  padding: 0.6rem 1.2rem;
+  transition: background 0.2s;
+}
+.schedule-upload-row button:hover:not(:disabled) { background: #2b5a48; }
+.schedule-upload-row button:disabled { cursor: wait; opacity: 0.6; }
+.error { color: #b52f2f; margin: 0.5rem 0 0; font-size: 0.85rem; }
+.active-stage-note {
+  margin: 0.75rem 0 0;
+  padding: 0.5rem 0.75rem;
+  background: #e8f5ed;
+  border-radius: 6px;
+  font-size: 0.9rem;
 }
 
 /* Analytics bar */
@@ -137,5 +252,40 @@ onMounted(loadAnalytics)
   font-family: sans-serif;
   color: #777;
   margin-top: 0.2rem;
+}
+
+/* Recent incidents */
+.recent-section { margin-top: 2rem; }
+.recent-item {
+  padding: 0.75rem 1rem;
+  border-left: 4px solid #ccc;
+  margin-bottom: 0.75rem;
+  border-radius: 0 6px 6px 0;
+  background: #fafafa;
+}
+.recent-item.ok { border-left-color: #2b8a5a; }
+.recent-item.warning { border-left-color: #e8a317; }
+.recent-item.critical { border-left-color: #b52f2f; }
+.recent-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.3rem;
+}
+.recent-status {
+  font-weight: 700;
+  font-size: 0.8rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 10px;
+  background: #f0f0f0;
+}
+.recent-stage { font-weight: 600; font-size: 0.85rem; }
+.recent-date { font-size: 0.75rem; color: #888; margin-left: auto; }
+.recent-explanation {
+  font-size: 0.82rem;
+  color: #555;
+  line-height: 1.4;
+  margin: 0;
 }
 </style>

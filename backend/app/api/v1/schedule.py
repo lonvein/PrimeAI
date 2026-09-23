@@ -8,10 +8,10 @@ from datetime import datetime
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from ...schemas.contracts import ScheduleRow, ScheduleUploadResponse
+from ...services.ontology import get_all_stage_names, load_schedule_rules
 from ...services.schedule_parser import (
     get_active_stages,
     parse_schedule_structured,
-    schedule_row_to_stage_requirement,
 )
 
 router = APIRouter(prefix="/schedule", tags=["schedule"])
@@ -29,7 +29,8 @@ async def upload_schedule(
 ) -> ScheduleUploadResponse:
     """Parse an uploaded Excel schedule and return structured stage data.
 
-    Optionally determines which stage is active on the given date.
+    Side effect: updates the ontology with schedule-derived machinery rules
+    so that subsequent /analyze calls use the uploaded normative requirements.
     """
     file_bytes = await file.read()
 
@@ -37,6 +38,10 @@ async def upload_schedule(
         rows: list[ScheduleRow] = parse_schedule_structured(file_bytes)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Load schedule rules into ontology (dynamic override).
+    loaded_count = load_schedule_rules(rows)
+    logger.info("Loaded %d schedule-derived rules into ontology.", loaded_count)
 
     # Determine active stage for the requested date.
     if query_date:
@@ -74,11 +79,8 @@ async def upload_schedule(
 
 @router.get("/stages", response_model=list[str])
 async def list_stages() -> list[str]:
-    """Return the static list of known stage names from the ontology.
+    """Return combined list of known stage names from schedule + static ontology.
 
-    This allows the frontend to populate the stage dropdown without
-    requiring a schedule upload.
+    If a schedule has been uploaded, its stages appear first.
     """
-    from ...services.ontology import STAGE_RULES  # noqa: PLC0415
-
-    return list(STAGE_RULES.keys())
+    return get_all_stage_names()
