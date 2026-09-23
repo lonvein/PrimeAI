@@ -8,16 +8,25 @@ from pydantic import BaseModel, Field
 
 
 class MachineryType(str, Enum):
-    """Supported construction machinery classes."""
+    """Supported construction machinery classes (8 target classes of DGP Moscow)."""
 
     EXCAVATOR = "excavator"
     DUMP_TRUCK = "dump_truck"
     BULLDOZER = "bulldozer"
     CONCRETE_MIXER = "concrete_mixer"
     MOBILE_CRANE = "mobile_crane"
-    CRANE_MANIPULATOR = "crane_manipulator"
+    MANIPULATOR = "manipulator"
+    CRANE_MANIPULATOR = "manipulator"
     ROLLER = "roller"
     TRUCK = "truck"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "MachineryType | None":
+        if isinstance(value, str):
+            normalized = value.casefold().strip().replace("-", "_").replace(" ", "_")
+            if normalized in ("crane_manipulator", "кран_манипулятор", "манипулятор"):
+                return cls.MANIPULATOR
+        return None
 
 
 class DetectionItem(BaseModel):
@@ -47,10 +56,9 @@ class IncidentStatus(str, Enum):
 class ObservationQuality(str, Enum):
     """How reliable is the detection result for compliance judgement.
 
-    HIGH   — real model loaded, multiple detections found.
-    MEDIUM — real model loaded, but no domain classes detected
-             (model may be pre-COCO; absence does not mean violation).
-    LOW    — synthetic fallback active (weights missing).
+    HIGH   — real model loaded, reliable camera angle and coverage.
+    MEDIUM — real model loaded, average scene quality.
+    LOW    — distant camera angle / top-down view (<2% box area) or synthetic fallback.
     """
 
     HIGH = "HIGH"
@@ -68,17 +76,21 @@ class AnalyzeResponse(BaseModel):
     explanation: str
     missing_machinery: list[str]
     unexpected_machinery: list[str]
-    # NEW: tells the frontend (and the user) how reliable the result is.
+    # Observation quality: HIGH, MEDIUM, LOW
     observation_quality: ObservationQuality = ObservationQuality.MEDIUM
-    # NEW: indicates whether the model is fine-tuned for construction or generic COCO.
+    # Specific camera angle recommendation when quality is LOW
+    camera_recommendation: str | None = None
+    # Model indicator
     model_is_construction_specific: bool = False
+    # Persisted incident ID in DB for 1-click PDF Act generation
+    incident_id: int | None = None
     # URLs for raw unmodified photo and annotated preview photo:
     raw_image_url: str | None = None
     annotated_image_url: str | None = None
     image_url: str | None = None  # alias for annotated_image_url
     # Backward compatibility:
     debug_image_url: str | None = None
-    # NEW: extracted timestamp from photo EXIF metadata or filename (if available).
+    # Extracted timestamp from photo EXIF metadata or filename (if available).
     photo_timestamp: datetime | None = None
 
 

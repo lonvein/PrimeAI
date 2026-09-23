@@ -13,7 +13,7 @@ def test_machinery_aliases_covers_all_8_dgp_classes() -> None:
         "dump_truck",
         "excavator",
         "roller",
-        "crane_manipulator",
+        "manipulator",
         "bulldozer",
         "mobile_crane",
         "concrete_mixer",
@@ -24,6 +24,8 @@ def test_machinery_aliases_covers_all_8_dgp_classes() -> None:
         assert target in mapped_values, f"Missing target class in aliases: {target}"
         # Ensure it maps to valid MachineryType enum
         assert MachineryType(target) is not None
+    # Backward compatibility check for crane_manipulator
+    assert MachineryType("crane_manipulator") == MachineryType.MANIPULATOR
 
 
 def test_detector_loads_specialized_model() -> None:

@@ -61,14 +61,14 @@ MACHINERY_ALIASES: dict[str, str] = {
     "steam_roller":     "roller",
     "каток":            "roller",
 
-    # --- 4. crane_manipulator (кран-манипулятор) ---
-    "crane_manipulator": "crane_manipulator",
-    "manipulator":      "crane_manipulator",
-    "crane_truck":      "crane_manipulator",
-    "loader_crane":     "crane_manipulator",
-    "boom_truck":       "crane_manipulator",
-    "кран_манипулятор": "crane_manipulator",
-    "манипулятор":      "crane_manipulator",
+    # --- 4. manipulator (кран-манипулятор) ---
+    "manipulator":       "manipulator",
+    "crane_manipulator": "manipulator",
+    "crane_truck":       "manipulator",
+    "loader_crane":      "manipulator",
+    "boom_truck":        "manipulator",
+    "кран_манипулятор":  "manipulator",
+    "манипулятор":       "manipulator",
 
     # --- 5. bulldozer (бульдозер) ---
     "bulldozer":        "bulldozer",
@@ -109,6 +109,63 @@ MACHINERY_ALIASES: dict[str, str] = {
     "погрузчик":        "truck",
     "грузовик":         "truck",
 }
+
+
+def _box_area(b: list[float]) -> float:
+    """Calculate area of bbox [x1, y1, x2, y2]."""
+    return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+
+def _intersection_area(b1: list[float], b2: list[float]) -> float:
+    """Calculate intersection area of two bboxes."""
+    x1 = max(b1[0], b2[0])
+    y1 = max(b1[1], b2[1])
+    x2 = min(b1[2], b2[2])
+    y2 = min(b1[3], b2[3])
+    w = max(0.0, x2 - x1)
+    h = max(0.0, y2 - y1)
+    return w * h
+
+
+def suppress_contained_boxes(
+    detections: list[DetectionItem], threshold: float = 0.75
+) -> list[DetectionItem]:
+    """Filter out nested detections where a smaller box is contained within a larger box.
+
+    If more than `threshold` (default 75%) of a box's area lies inside another
+    larger bounding box, the smaller (nested) box is suppressed.
+    """
+    if len(detections) <= 1:
+        return detections
+
+    suppressed: set[int] = set()
+    areas = [_box_area(d.bbox) for d in detections]
+
+    for i in range(len(detections)):
+        if i in suppressed or areas[i] <= 0:
+            continue
+        for j in range(len(detections)):
+            if i == j or j in suppressed or areas[j] <= 0:
+                continue
+
+            # Check if box j is inside box i (box i has larger or equal area)
+            if areas[i] > areas[j] or (
+                areas[i] == areas[j] and detections[i].confidence >= detections[j].confidence
+            ):
+                inter = _intersection_area(detections[i].bbox, detections[j].bbox)
+                containment = inter / areas[j]
+                if containment >= threshold:
+                    logger.debug(
+                        "Suppressing nested box %s (conf=%.2f) inside %s (conf=%.2f, containment=%.1f%%)",
+                        detections[j].class_name.value,
+                        detections[j].confidence,
+                        detections[i].class_name.value,
+                        detections[i].confidence,
+                        containment * 100,
+                    )
+                    suppressed.add(j)
+
+    return [d for idx, d in enumerate(detections) if idx not in suppressed]
 
 
 class MachineryDetector:
@@ -176,7 +233,8 @@ class MachineryDetector:
         Guaranteed memory efficiency:
         - FP16 (half=True) when on GPU.
         - Automatic torch.cuda.empty_cache() cleanup in finally block.
-        - Logging of any runtime errors without silent exception suppression.
+        - Class-Agnostic NMS (agnostic_nms=True) to avoid duplicate cross-class bounding boxes.
+        - Post-processing suppression of nested boxes (suppress_contained_boxes).
         """
         try:
             image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -200,10 +258,12 @@ class MachineryDetector:
                 predict_kwargs["half"] = True
 
             result = self._model.predict(**predict_kwargs)[0]
-            detections = self._parse_result(result)
+            raw_detections = self._parse_result(result)
+            detections = suppress_contained_boxes(raw_detections, threshold=0.75)
             logger.debug(
-                "Inference complete: %d raw boxes -> %d domain detections",
+                "Inference complete: %d raw boxes -> %d domain -> %d suppressed detections",
                 len(result.boxes),
+                len(raw_detections),
                 len(detections),
             )
             return detections

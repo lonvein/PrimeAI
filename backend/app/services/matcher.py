@@ -45,6 +45,8 @@ def evaluate_compliance(
     stage_name: str,
     detected_classes: list[str],
     *,
+    detections: list[DetectionItem] | None = None,
+    image_shape: tuple[int, int] | None = None,
     model_is_real: bool = True,
     model_is_construction: bool = True,
 ) -> AnalyzeResponse:
@@ -56,6 +58,10 @@ def evaluate_compliance(
         Name of the construction stage (matched against ontology).
     detected_classes:
         List of MachineryType value strings returned by the detector.
+    detections:
+        Optional list of DetectionItem objects for bounding-box geometry analysis.
+    image_shape:
+        Optional (height, width) of the image for relative area calculation.
     model_is_real:
         False when synthetic fallback is active (no weights loaded).
     model_is_construction:
@@ -90,9 +96,29 @@ def evaluate_compliance(
         and machinery not in rules.optional_machinery
     ]
 
+    # --- Evaluate camera angle geometry (relative bounding-box area) ---
+    camera_recommendation: str | None = None
+    avg_rel_area: float | None = None
+    if detections and image_shape:
+        height, width = image_shape
+        frame_area = max(1.0, float(height * width))
+        rel_areas = [
+            max(0.0, (d.bbox[2] - d.bbox[0]) * (d.bbox[3] - d.bbox[1])) / frame_area
+            for d in detections
+        ]
+        if rel_areas:
+            avg_rel_area = sum(rel_areas) / len(rel_areas)
+
     # --- Determine observation quality ---
     if not model_is_real:
         observation_quality = ObservationQuality.LOW
+    elif avg_rel_area is not None and avg_rel_area < 0.02:
+        # Distance > 80m or high-altitude / steep perspective from 20th floor:
+        observation_quality = ObservationQuality.LOW
+        camera_recommendation = (
+            "Качество ракурса: LOW (дальний план / острый угол съемки с верхнего яруса). "
+            "Рекомендуется скорректировать угол наклона или переключиться на секторную камеру въезда №2."
+        )
     elif missing and not model_is_construction:
         # Generic COCO model cannot see most construction classes.
         # Absence in photo ≠ absence on site.
@@ -117,6 +143,15 @@ def evaluate_compliance(
         explanation = (
             f"Этап «{rules.stage_name}» не найден в нормативном справочнике. "
             "Автоматическое подтверждение соответствия невозможно; добавьте правило этапа."
+        )
+    elif missing and observation_quality == ObservationQuality.LOW:
+        # Low camera quality — do NOT penalize with CRITICAL!
+        status = IncidentStatus.WARNING
+        rec_text = camera_recommendation or "Рекомендуется скорректировать ракурс съемки."
+        explanation = (
+            f"На этапе «{rules.stage_name}» зафиксирован возможный дефицит техники: {', '.join(missing)}. "
+            f"{rec_text} Во избежание ложного штрафа статус зафиксирован как ПРЕДУПРЕЖДЕНИЕ (WARNING) "
+            "до проведения перепроверки с секторной камеры."
         )
     elif missing and model_is_construction:
         # Fine-tuned model + machinery missing = CRITICAL.
@@ -174,6 +209,7 @@ def evaluate_compliance(
         missing_machinery=missing,
         unexpected_machinery=unexpected,
         observation_quality=observation_quality,
+        camera_recommendation=camera_recommendation,
         model_is_construction_specific=model_is_construction,
     )
 

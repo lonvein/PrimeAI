@@ -18,7 +18,7 @@ from uuid import uuid4
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -28,6 +28,7 @@ from ...schemas.contracts import AnalyzeResponse, BatchAnalyzeResponse, Observat
 from ...services.detector import MachineryDetector
 from ...services.exif_utils import extract_photo_date
 from ...services.matcher import evaluate_batch_compliance, evaluate_compliance
+from ...services.report_generator import generate_incident_act_pdf
 from ...core.config import get_settings
 
 router = APIRouter(tags=["monitoring"])
@@ -114,6 +115,7 @@ def _persist_analysis(
             db.add(det)
 
         db.commit()
+        response.incident_id = incident.id
         logger.debug("Persisted incident id=%d  status=%s", incident.id, response.status.value)
     except Exception as exc:
         db.rollback()
@@ -158,10 +160,14 @@ async def analyze(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # 3. Evaluate compliance with honest observation semantics.
-    response = evaluate_compliance(
+    # 3. Evaluate compliance with honest observation semantics & camera angle analysis.
+    h, w = img_array.shape[:2]
+    response = await run_in_threadpool(
+        evaluate_compliance,
         stage_name,
         [item.class_name.value for item in detections],
+        detections=detections,
+        image_shape=(h, w),
         model_is_real=detector.is_real_model,
         model_is_construction=detector.model_is_construction,
     )
@@ -223,9 +229,13 @@ async def batch_analyze(
         except ValueError:
             detections = []
 
-        result = evaluate_compliance(
+        h, w = img_array.shape[:2]
+        result = await run_in_threadpool(
+            evaluate_compliance,
             stage_name,
             [item.class_name.value for item in detections],
+            detections=detections,
+            image_shape=(h, w),
             model_is_real=detector.is_real_model,
             model_is_construction=detector.model_is_construction,
         )
@@ -296,4 +306,28 @@ async def batch_analyze(
         missing_machinery=missing_machinery,
         unexpected_machinery=unexpected_machinery,
         items=individual_results,
+    )
+
+
+@router.get("/monitoring/incidents/{incident_id}/pdf")
+@router.get("/incidents/{incident_id}/pdf")
+async def get_incident_pdf(incident_id: int, db: Session = Depends(get_db)) -> Response:
+    """Generate and return official Moscow DGP Construction Control Act PDF."""
+    incident = db.get(IncidentAlert, incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail=f"Incident with ID {incident_id} not found")
+
+    pdf_bytes = await run_in_threadpool(
+        generate_incident_act_pdf,
+        incident,
+        incident.annotated_image_path,
+    )
+
+    filename = f"incident_{incident_id}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
     )

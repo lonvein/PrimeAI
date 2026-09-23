@@ -57,6 +57,12 @@ function selectSchedule(event) {
   scheduleError.value = ''
 }
 
+function downloadPdf(id) {
+  if (!id) return
+  const url = `/api/v1/monitoring/incidents/${id}/pdf`
+  window.open(url, '_blank')
+}
+
 onMounted(loadAnalytics)
 </script>
 
@@ -132,6 +138,8 @@ onMounted(loadAnalytics)
         :missing-machinery="analysis?.missing_machinery || []"
         :unexpected-machinery="analysis?.unexpected_machinery || []"
         :observation-quality="analysis?.observation_quality || ''"
+        :camera-recommendation="analysis?.camera_recommendation || ''"
+        :incident-id="analysis?.incident_id"
         :model-is-construction-specific="analysis?.model_is_construction_specific || false"
       />
 
@@ -140,9 +148,24 @@ onMounted(loadAnalytics)
         <h2>📋 Последние проверки</h2>
         <div v-for="inc in analytics.recent_incidents" :key="inc.id" class="recent-item" :class="inc.status.toLowerCase()">
           <div class="recent-header">
-            <span class="recent-status">{{ inc.status }}</span>
-            <span class="recent-stage">{{ inc.stage_name }}</span>
-            <span class="recent-date">{{ new Date(inc.created_at).toLocaleString('ru-RU') }}</span>
+            <div class="recent-header-left">
+              <span class="recent-status">{{ inc.status }}</span>
+              <span class="recent-stage">{{ inc.stage_name }}</span>
+              <span v-if="inc.observation_quality" :class="['recent-quality', 'q-' + inc.observation_quality.toLowerCase()]">
+                {{ inc.observation_quality }}
+              </span>
+            </div>
+            <div class="recent-header-right">
+              <button
+                v-if="inc.status === 'WARNING' || inc.status === 'CRITICAL'"
+                class="recent-pdf-btn"
+                @click="downloadPdf(inc.id)"
+                title="Скачать официальный Акт фиксации ДГП Москвы (PDF)"
+              >
+                📄 Акт (PDF)
+              </button>
+              <span class="recent-date">{{ new Date(inc.created_at).toLocaleString('ru-RU') }}</span>
+            </div>
           </div>
           <p class="recent-explanation">{{ inc.explanation }}</p>
         </div>
@@ -268,9 +291,21 @@ onMounted(loadAnalytics)
 .recent-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 0.75rem;
   flex-wrap: wrap;
-  margin-bottom: 0.3rem;
+  margin-bottom: 0.4rem;
+}
+.recent-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.recent-header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
 }
 .recent-status {
   font-weight: 700;
@@ -279,8 +314,33 @@ onMounted(loadAnalytics)
   border-radius: 10px;
   background: #f0f0f0;
 }
+.recent-quality {
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.1rem 0.45rem;
+  border-radius: 8px;
+}
+.q-high { background: #e8f5ed; color: #1b6b3e; }
+.q-medium { background: #fff8e1; color: #856404; }
+.q-low { background: #fff3cd; color: #995a00; }
+
+.recent-pdf-btn {
+  background: #0a2540;
+  color: #fff;
+  border: none;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.25rem 0.6rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.recent-pdf-btn:hover {
+  background: #193d64;
+}
+
 .recent-stage { font-weight: 600; font-size: 0.85rem; }
-.recent-date { font-size: 0.75rem; color: #888; margin-left: auto; }
+.recent-date { font-size: 0.75rem; color: #888; }
 .recent-explanation {
   font-size: 0.82rem;
   color: #555;
