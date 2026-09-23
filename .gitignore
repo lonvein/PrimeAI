@@ -6,6 +6,11 @@ venv/
 .env
 *.db
 backend/static/debug/*
+!backend/static/debug/.gitkeep
+backend/static/raw/*
+!backend/static/raw/.gitkeep
+backend/static/annotated/*
+!backend/static/annotated/.gitkeep
 ml/weights/*.pt
 frontend/node_modules/
 frontend/dist/

@@ -116,10 +116,12 @@ onMounted(loadAnalytics)
         <UploadModal @analyzed="handleAnalyzed" />
       </div>
 
-      <!-- Photo with bounding boxes -->
+      <!-- Photo with bounding boxes and original RAW link -->
       <PhotoViewer
         :image-file="localFile"
-        :debug-image-url="analysis?.debug_image_url || ''"
+        :debug-image-url="analysis?.annotated_image_url || analysis?.image_url || analysis?.debug_image_url || ''"
+        :annotated-image-url="analysis?.annotated_image_url || ''"
+        :raw-image-url="analysis?.raw_image_url || ''"
         :detections="analysis?.detections || []"
       />
 

@@ -72,7 +72,11 @@ class AnalyzeResponse(BaseModel):
     observation_quality: ObservationQuality = ObservationQuality.MEDIUM
     # NEW: indicates whether the model is fine-tuned for construction or generic COCO.
     model_is_construction_specific: bool = False
-    # NEW: optional URL of the annotated debug image saved by the backend.
+    # URLs for raw unmodified photo and annotated preview photo:
+    raw_image_url: str | None = None
+    annotated_image_url: str | None = None
+    image_url: str | None = None  # alias for annotated_image_url
+    # Backward compatibility:
     debug_image_url: str | None = None
     # NEW: extracted timestamp from photo EXIF metadata or filename (if available).
     photo_timestamp: datetime | None = None

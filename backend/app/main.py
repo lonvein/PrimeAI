@@ -19,10 +19,26 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
+from sqlalchemy import text
+
 # ---------------------------------------------------------------------------
 # Create DB tables on startup (idempotent — skips if already exist).
 # ---------------------------------------------------------------------------
 Base.metadata.create_all(bind=engine)
+
+# Auto-migrate new columns for existing SQLite/Postgres tables
+with engine.begin() as conn:
+    for table, col in [
+        ("incident_alerts", "raw_image_path VARCHAR(512)"),
+        ("incident_alerts", "annotated_image_path VARCHAR(512)"),
+        ("machinery_detections", "raw_image_path VARCHAR(512)"),
+        ("machinery_detections", "annotated_image_path VARCHAR(512)"),
+    ]:
+        try:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col}"))
+        except Exception:
+            pass
+
 logger.info("Database tables ready: %s", settings.database_url)
 
 # ---------------------------------------------------------------------------

@@ -18,11 +18,33 @@ class Settings(BaseSettings):
     yolo_confidence: float = 0.25
     static_dir: Path = Path("backend/static")
 
+    @property
+    def raw_dir(self) -> Path:
+        p = self.static_dir / "raw"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    @property
+    def annotated_dir(self) -> Path:
+        p = self.static_dir / "annotated"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    @property
+    def debug_dir(self) -> Path:
+        p = self.static_dir / "debug"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 
 @lru_cache
 def get_settings() -> Settings:
     """Return one cached settings instance for the process."""
-
-    return Settings()
+    settings = Settings()
+    # Ensure static subdirectories exist upon initialization
+    settings.raw_dir
+    settings.annotated_dir
+    settings.debug_dir
+    return settings

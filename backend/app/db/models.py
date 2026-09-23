@@ -54,6 +54,8 @@ class MachineryDetection(Base):
     class_name: Mapped[str] = mapped_column(String(64), index=True)
     confidence: Mapped[float] = mapped_column(Float)  # was String, now correct Float
     bbox: Mapped[str] = mapped_column(Text)  # JSON: "[x1, y1, x2, y2]"
+    raw_image_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    annotated_image_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow
     )
@@ -61,13 +63,21 @@ class MachineryDetection(Base):
     stage: Mapped["Stage | None"] = relationship("Stage", back_populates="detections")
 
     @classmethod
-    def from_detection_item(cls, item, stage_id: int | None = None) -> "MachineryDetection":
+    def from_detection_item(
+        cls,
+        item,
+        stage_id: int | None = None,
+        raw_image_path: str | None = None,
+        annotated_image_path: str | None = None,
+    ) -> "MachineryDetection":
         """Create from a DetectionItem schema object."""
         return cls(
             stage_id=stage_id,
             class_name=item.class_name.value,
             confidence=item.confidence,
             bbox=json.dumps([round(v, 1) for v in item.bbox]),
+            raw_image_path=raw_image_path,
+            annotated_image_path=annotated_image_path,
         )
 
 
@@ -87,6 +97,8 @@ class IncidentAlert(Base):
     missing_machinery: Mapped[str] = mapped_column(Text, default="[]")
     # JSON list of unexpected machinery names
     unexpected_machinery: Mapped[str] = mapped_column(Text, default="[]")
+    raw_image_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    annotated_image_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow
     )

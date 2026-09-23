@@ -1,14 +1,22 @@
 <script setup>
-import { ref, watch, onMounted, nextTick } from 'vue'
+import { ref, watch, computed, nextTick } from 'vue'
 
 const props = defineProps({
   /** File object or Blob of the uploaded image. */
   imageFile: { type: [File, Blob], default: null },
-  /** URL of the debug image with bounding boxes drawn by backend. */
+  /** URL of the annotated image with bounding boxes drawn by backend. */
   debugImageUrl: { type: String, default: '' },
+  annotatedImageUrl: { type: String, default: '' },
+  imageUrl: { type: String, default: '' },
+  /** URL of the raw unmodified original photo. */
+  rawImageUrl: { type: String, default: '' },
   /** Array of DetectionItem objects from the API. */
   detections: { type: Array, default: () => [] },
 })
+
+const activeAnnotatedUrl = computed(
+  () => props.annotatedImageUrl || props.imageUrl || props.debugImageUrl || '',
+)
 
 const canvasRef = ref(null)
 const naturalWidth = ref(0)
@@ -69,18 +77,29 @@ watch(
 </script>
 
 <template>
-  <div class="photo-viewer" v-if="imageFile || debugImageUrl">
+  <div class="photo-viewer" v-if="imageFile || activeAnnotatedUrl">
     <div class="viewer-header">
-      <h3>📷 Результат анализа</h3>
-      <label v-if="debugImageUrl && imageFile" class="toggle">
+      <div class="header-left">
+        <h3>📷 Результат анализа</h3>
+        <a
+          v-if="rawImageUrl"
+          :href="rawImageUrl"
+          target="_blank"
+          class="raw-link"
+          title="Открыть исходный файл без разметки (доказательная база ДГП)"
+        >
+          🔍 Исходный снимок (RAW)
+        </a>
+      </div>
+      <label v-if="activeAnnotatedUrl && imageFile" class="toggle">
         <input type="checkbox" v-model="showDebugImage" />
         Серверная разметка
       </label>
     </div>
 
     <!-- Option 1: Server-side annotated image -->
-    <div v-if="showDebugImage && debugImageUrl" class="image-container">
-      <img :src="debugImageUrl" alt="Annotated construction site photo" class="result-image" />
+    <div v-if="showDebugImage && activeAnnotatedUrl" class="image-container">
+      <img :src="activeAnnotatedUrl" alt="Annotated construction site photo" class="result-image" />
     </div>
 
     <!-- Option 2: Client-side canvas overlay -->
@@ -109,9 +128,31 @@ watch(
 }
 .viewer-header {
   display: flex;
-  align-items: center;
   justify-content: space-between;
-  padding: 1rem 1.5rem 0.5rem;
+  align-items: center;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid #eee;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.raw-link {
+  font-size: 0.8rem;
+  color: #2b8a5a;
+  text-decoration: none;
+  background: #e8f5ed;
+  padding: 0.25rem 0.6rem;
+  border-radius: 4px;
+  font-weight: 600;
+  transition: background 0.2s;
+}
+.raw-link:hover {
+  background: #d4ecdc;
 }
 .viewer-header h3 { margin: 0; font-size: 1.1rem; }
 .toggle {

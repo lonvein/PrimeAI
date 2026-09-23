@@ -117,11 +117,13 @@ class MachineryDetector:
     def __init__(
         self,
         weights_path: str | Path | None = None,
-        confidence: float | None = None,
+        confidence: float | None = 0.35,
+        iou: float | None = 0.45,
     ) -> None:
         settings = get_settings()
         self.weights_path = Path(weights_path or settings.yolo_weights)
         self.confidence = confidence if confidence is not None else settings.yolo_confidence
+        self.iou = iou
         self.imgsz = 640
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self._model = None
@@ -188,6 +190,8 @@ class MachineryDetector:
             predict_kwargs: dict[str, object] = {
                 "source": image,
                 "conf": self.confidence,
+                "iou": self.iou,
+                "agnostic_nms": True,
                 "imgsz": self.imgsz,
                 "device": self.device,
                 "verbose": False,

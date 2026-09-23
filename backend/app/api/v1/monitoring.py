@@ -42,8 +42,20 @@ logger = logging.getLogger(__name__)
 detector = MachineryDetector()
 
 
-def _annotate_and_save(image: np.ndarray, detections: list) -> str:
-    """Draw bounding boxes on image, save to debug dir, return relative URL."""
+def _save_raw_image(image_bytes: bytes, filename: str | None, file_uuid: str) -> tuple[Path, str]:
+    """Save original unmodified photo bytes to static/raw/ preserving full evidence and EXIF."""
+    ext = Path(filename).suffix.lower() if filename else ".jpg"
+    if ext not in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff"}:
+        ext = ".jpg"
+    raw_filename = f"{file_uuid}{ext}"
+    raw_path = settings.raw_dir / raw_filename
+    raw_path.write_bytes(image_bytes)
+    logger.debug("Raw original image saved: %s", raw_path)
+    return raw_path, f"/static/raw/{raw_filename}"
+
+
+def _annotate_and_save(image: np.ndarray, detections: list, file_uuid: str) -> tuple[Path, str]:
+    """Draw bounding boxes on image, save to static/annotated/ and static/debug/."""
     annotated = image.copy()
     for detection in detections:
         left, top, right, bottom = (int(v) for v in detection.bbox)
@@ -58,19 +70,26 @@ def _annotate_and_save(image: np.ndarray, detections: list) -> str:
             (0, 190, 80),
             2,
         )
-    filename = f"{uuid4().hex}.jpg"
-    save_path = DEBUG_DIR / filename
-    cv2.imwrite(str(save_path), annotated)
-    logger.debug("Debug image saved: %s", save_path)
-    return f"/static/debug/{filename}"
+    filename = f"{file_uuid}.jpg"
+    annotated_path = settings.annotated_dir / filename
+    cv2.imwrite(str(annotated_path), annotated)
+
+    # Also save to debug/ for backward compatibility
+    debug_path = settings.debug_dir / filename
+    cv2.imwrite(str(debug_path), annotated)
+
+    logger.debug("Annotated preview image saved: %s", annotated_path)
+    return annotated_path, f"/static/annotated/{filename}"
 
 
 def _persist_analysis(
     db: Session,
     response: AnalyzeResponse,
     detections: list,
+    raw_image_path: str | None = None,
+    annotated_image_path: str | None = None,
 ) -> None:
-    """Save incident and detections to the database."""
+    """Save incident and detections to the database with links to raw and annotated photos."""
     try:
         incident = IncidentAlert(
             stage_name=response.active_stage,
@@ -79,12 +98,19 @@ def _persist_analysis(
             observation_quality=response.observation_quality.value,
             missing_machinery=json.dumps(response.missing_machinery),
             unexpected_machinery=json.dumps(response.unexpected_machinery),
+            raw_image_path=raw_image_path,
+            annotated_image_path=annotated_image_path,
         )
         db.add(incident)
         db.flush()  # get incident.id
 
         for item in detections:
-            det = MachineryDetection.from_detection_item(item)
+            det = MachineryDetection.from_detection_item(
+                item,
+                stage_id=incident.stage_id,
+                raw_image_path=raw_image_path,
+                annotated_image_path=annotated_image_path,
+            )
             db.add(det)
 
         db.commit()
@@ -116,19 +142,23 @@ async def analyze(
     The image is decoded once; the same array is used for inference and annotation.
     """
     image_bytes = await image.read()
+    file_uuid = uuid4().hex
 
-    # Decode image once.
+    # 1. Save pristine raw image first (preserves EXIF and original bytes)
+    _, raw_url = await run_in_threadpool(_save_raw_image, image_bytes, image.filename, file_uuid)
+
+    # Decode image once for inference and annotation.
     img_array = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
     if img_array is None:
         raise HTTPException(status_code=400, detail="Uploaded file is not a readable image")
 
-    # Run detector in threadpool to avoid blocking event loop
+    # 2. Run detector in threadpool to avoid blocking event loop
     try:
         detections = await run_in_threadpool(detector.detect, image_bytes)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Evaluate compliance with honest observation semantics.
+    # 3. Evaluate compliance with honest observation semantics.
     response = evaluate_compliance(
         stage_name,
         [item.class_name.value for item in detections],
@@ -143,12 +173,21 @@ async def analyze(
     if photo_date:
         response.timestamp = photo_date
 
-    # Save annotated debug image in threadpool and add URL to response.
-    debug_url = await run_in_threadpool(_annotate_and_save, img_array, detections)
-    response.debug_image_url = debug_url
+    # 4. Save annotated preview image in threadpool
+    _, annotated_url = await run_in_threadpool(_annotate_and_save, img_array, detections, file_uuid)
+    response.raw_image_url = raw_url
+    response.annotated_image_url = annotated_url
+    response.image_url = annotated_url
+    response.debug_image_url = annotated_url  # backward compatibility
 
-    # Persist to DB (non-blocking on failure).
-    _persist_analysis(db, response, detections)
+    # 5. Persist to DB with links to raw and annotated photos
+    _persist_analysis(
+        db,
+        response,
+        detections,
+        raw_image_path=raw_url,
+        annotated_image_path=annotated_url,
+    )
 
     return response
 
@@ -169,6 +208,11 @@ async def batch_analyze(
 
     for image in images:
         image_bytes = await image.read()
+        file_uuid = uuid4().hex
+
+        # 1. Save raw image
+        _, raw_url = await run_in_threadpool(_save_raw_image, image_bytes, image.filename, file_uuid)
+
         img_array = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
         if img_array is None:
             logger.warning("Skipping unreadable image in batch: %s", image.filename)
@@ -186,13 +230,26 @@ async def batch_analyze(
             model_is_construction=detector.model_is_construction,
         )
         result.detections = detections
-        result.debug_image_url = await run_in_threadpool(_annotate_and_save, img_array, detections)
+
+        # 2. Save annotated preview image
+        _, annotated_url = await run_in_threadpool(_annotate_and_save, img_array, detections, file_uuid)
+        result.raw_image_url = raw_url
+        result.annotated_image_url = annotated_url
+        result.image_url = annotated_url
+        result.debug_image_url = annotated_url
+
         photo_date = extract_photo_date(image_bytes, image.filename)
         result.photo_timestamp = photo_date
         if photo_date:
             result.timestamp = photo_date
 
-        _persist_analysis(db, result, detections)
+        _persist_analysis(
+            db,
+            result,
+            detections,
+            raw_image_path=raw_url,
+            annotated_image_path=annotated_url,
+        )
         individual_results.append(result)
         all_detected_classes.extend([item.class_name.value for item in detections])
 
