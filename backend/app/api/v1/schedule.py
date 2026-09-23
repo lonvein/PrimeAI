@@ -12,6 +12,7 @@ from ...services.ontology import get_all_stage_names, load_schedule_rules
 from ...services.schedule_parser import (
     get_active_stages,
     parse_schedule_structured,
+    set_loaded_schedule,
 )
 
 router = APIRouter(prefix="/schedule", tags=["schedule"])
@@ -39,8 +40,9 @@ async def upload_schedule(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Load schedule rules into ontology (dynamic override).
-    loaded_count = load_schedule_rules(rows)
+    # Load schedule rows into in-memory cache and ontology
+    set_loaded_schedule(rows)
+    loaded_count = len(rows)
     logger.info("Loaded %d schedule-derived rules into ontology.", loaded_count)
 
     # Determine active stage for the requested date.

@@ -92,6 +92,18 @@ class AnalyzeResponse(BaseModel):
     debug_image_url: str | None = None
     # Extracted timestamp from photo EXIF metadata or filename (if available).
     photo_timestamp: datetime | None = None
+    # Date auto-detected or specified (YYYY-MM-DD)
+    detected_date: str | None = None
+    # Active stage name (synced with active_stage)
+    stage_name: str | None = None
+    # Planned period for active stage {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}
+    stage_planned_period: dict[str, str] | None = None
+    # Normative machinery requirements from schedule {machinery_type: required_count}
+    machinery_plan: dict[str, int] = Field(default_factory=dict)
+    # Actually detected machinery counts {machinery_type: detected_count}
+    machinery_fact: dict[str, int] = Field(default_factory=dict)
+    # Compliance status alias (OK, WARNING, CRITICAL)
+    compliance_status: IncidentStatus | None = None
 
 
 class BatchAnalyzeResponse(BaseModel):

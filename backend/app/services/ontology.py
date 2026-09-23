@@ -160,20 +160,23 @@ def get_stage_rules(stage_name: str) -> StageRequirement:
         sched_rules = dict(_schedule_rules)
         sched_kw = dict(_schedule_keywords)
 
+    # 1. Exact match in schedule-derived rules
     for known_name, requirement in sched_rules.items():
         if _normalize(known_name) == normalized:
             return requirement
 
+    # 2. Exact match in static fallback rules
+    for known_name, requirement in STAGE_RULES.items():
+        if _normalize(known_name) == normalized:
+            return requirement
+
+    # 3. Keyword match in schedule-derived rules
     if sched_kw:
         best_name, best_score = _keyword_score(sched_kw, normalized)
         if best_score > 0:
             return sched_rules[best_name]
 
-    # --- Static fallback rules ---
-    for known_name, requirement in STAGE_RULES.items():
-        if _normalize(known_name) == normalized:
-            return requirement
-
+    # 4. Keyword match in static fallback rules
     best_name, best_score = _keyword_score(_STAGE_KEYWORDS, normalized)
     if best_score > 0:
         return STAGE_RULES[best_name]

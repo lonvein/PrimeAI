@@ -36,6 +36,12 @@ class Settings(BaseSettings):
         p.mkdir(parents=True, exist_ok=True)
         return p
 
+    @property
+    def demo_dir(self) -> Path:
+        p = self.static_dir / "demo"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 
@@ -47,4 +53,5 @@ def get_settings() -> Settings:
     settings.raw_dir
     settings.annotated_dir
     settings.debug_dir
+    settings.demo_dir
     return settings

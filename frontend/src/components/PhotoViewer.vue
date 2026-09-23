@@ -18,6 +18,20 @@ const activeAnnotatedUrl = computed(
   () => props.annotatedImageUrl || props.imageUrl || props.debugImageUrl || '',
 )
 
+const MACHINERY_RU = {
+  excavator: 'Экскаватор',
+  dump_truck: 'Самосвал',
+  bulldozer: 'Бульдозер',
+  concrete_mixer: 'Автобетоносмеситель',
+  mobile_crane: 'Автокран',
+  crane_manipulator: 'Кран-манипулятор',
+  manipulator: 'Кран-манипулятор',
+  roller: 'Каток',
+  truck: 'Грузовик',
+}
+
+const getRuLabel = (className) => MACHINERY_RU[className] || className
+
 const canvasRef = ref(null)
 const naturalWidth = ref(0)
 const naturalHeight = ref(0)
@@ -50,7 +64,8 @@ function drawBoxes(img) {
     ctx.strokeRect(x1, y1, w, h)
 
     // Label background
-    const label = `${det.class_name} ${(det.confidence * 100).toFixed(0)}%`
+    const ruName = getRuLabel(det.class_name)
+    const label = `${ruName} ${(det.confidence * 100).toFixed(0)}%`
     ctx.font = 'bold 16px sans-serif'
     const textMetrics = ctx.measureText(label)
     const textH = 22
@@ -110,7 +125,7 @@ watch(
     <!-- Detections list -->
     <div v-if="detections.length" class="detections-list">
       <span v-for="(det, i) in detections" :key="i" class="det-tag">
-        {{ det.class_name }}
+        {{ getRuLabel(det.class_name) }}
         <small>{{ (det.confidence * 100).toFixed(0) }}%</small>
       </span>
     </div>

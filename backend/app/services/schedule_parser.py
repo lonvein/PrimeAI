@@ -24,6 +24,8 @@ import logging
 import re
 from datetime import date, datetime
 from io import BytesIO
+from pathlib import Path
+import threading
 from typing import Any
 
 import pandas as pd
@@ -196,6 +198,104 @@ def schedule_row_to_stage_requirement(row: ScheduleRow) -> StageRequirement:
             MachineryType(k): v for k, v in row.required_machinery.items()
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Global Schedule Cache and Date-based Stage Resolution
+# ---------------------------------------------------------------------------
+_schedule_lock = threading.Lock()
+_loaded_schedule: list[ScheduleRow] = []
+
+
+def _find_default_schedule_file() -> Path | None:
+    """Find default Moscow DGP schedule Excel template."""
+    base_dir = Path(__file__).resolve().parents[3]
+    for rel_path in [
+        Path("MSC_lct/График_шаблон.xlsx"),
+        Path("data/Сводный перечень строительных работ_ЛТЦ.xlsx"),
+    ]:
+        p1 = base_dir / rel_path
+        if p1.is_file():
+            return p1
+        if rel_path.is_file():
+            return rel_path
+    return None
+
+
+def ensure_default_schedule_loaded() -> list[ScheduleRow]:
+    """Ensure that the default schedule template is loaded in memory."""
+    global _loaded_schedule
+    with _schedule_lock:
+        if _loaded_schedule:
+            return list(_loaded_schedule)
+
+        schedule_path = _find_default_schedule_file()
+        if schedule_path and schedule_path.is_file():
+            try:
+                rows = parse_schedule_structured(schedule_path.read_bytes())
+                _loaded_schedule = rows
+                logger.info(
+                    "Auto-loaded default schedule from %s (%d stages)",
+                    schedule_path,
+                    len(rows),
+                )
+                try:
+                    from .ontology import load_schedule_rules  # noqa: PLC0415
+                    load_schedule_rules(rows)
+                except Exception as exc:
+                    logger.warning("Could not sync default schedule rules to ontology: %s", exc)
+                return list(_loaded_schedule)
+            except Exception as exc:
+                logger.error("Failed to parse default schedule %s: %s", schedule_path, exc)
+    return []
+
+
+def get_loaded_schedule() -> list[ScheduleRow]:
+    """Return currently loaded schedule rows, initializing from template if needed."""
+    with _schedule_lock:
+        if _loaded_schedule:
+            return list(_loaded_schedule)
+    return ensure_default_schedule_loaded()
+
+
+def set_loaded_schedule(rows: list[ScheduleRow]) -> None:
+    """Set the active schedule rows and update ontology stage rules."""
+    global _loaded_schedule
+    with _schedule_lock:
+        _loaded_schedule = list(rows)
+    try:
+        from .ontology import load_schedule_rules  # noqa: PLC0415
+        load_schedule_rules(rows)
+    except Exception as exc:
+        logger.warning("Could not sync schedule rules to ontology: %s", exc)
+
+
+def get_schedule_date_range() -> tuple[datetime | None, datetime | None]:
+    """Return (min_start_date, max_end_date) across all stages in active schedule."""
+    schedule = get_loaded_schedule()
+    starts = [r.date_start for r in schedule if r.date_start]
+    ends = [r.date_end for r in schedule if r.date_end]
+    if not starts or not ends:
+        return None, None
+    return min(starts), max(ends)
+
+
+def get_active_stage_by_date(target_date: datetime | date | str) -> ScheduleRow | None:
+    """Find the active stage from the loaded schedule for a given date.
+
+    If multiple stages overlap on target_date, returns the one that started
+    most recently (highest date_start).
+    """
+    dt = _parse_date(target_date)
+    if dt is None:
+        return None
+
+    schedule = get_loaded_schedule()
+    active = get_active_stages(schedule, dt)
+    if not active:
+        return None
+
+    return max(active, key=lambda r: r.date_start or datetime.min)
 
 
 # ---------------------------------------------------------------------------
