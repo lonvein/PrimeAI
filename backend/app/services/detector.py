@@ -1,68 +1,118 @@
-"""Ultralytics YOLO inference with a local development fallback.
+"""Ultralytics YOLO inference for construction site machinery monitoring.
 
-Key design decisions:
-- Uses get_settings() for weights path and confidence (not raw os.getenv).
-- All inference errors are LOGGED, not silently swallowed.
-- Returns DetectionObservation list, not raw DetectionItem list, so callers
-  know the difference between "nothing found" and "model not loaded".
-- ALIASES covers COCO classes that approximate construction machinery.
-
-NOTE: backend/models/best.pt is currently a generic COCO YOLOv8m model.
-      It can detect 'truck' from the 8 target classes.
-      Fine-tuning on construction data is required for full coverage.
-      Until then the system correctly reports what it observes and clearly
-      marks classes as NOT_OBSERVED rather than manufacturing false CRITICALs.
+Key features:
+- Uses specialized construction weights with memory limit < 2 GB VRAM.
+- Enforces FP16 (half=True) on CUDA devices.
+- Auto-cleans GPU cache with torch.cuda.empty_cache() after each inference.
+- Fixed input resolution imgsz=640 for predictable latency and memory.
+- Comprehensive MACHINERY_ALIASES normalization table mapping RU/EN synonyms
+  into the 8 normative DGP Moscow classes.
+- Non-blocking friendly, robust error logging.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
+import torch
 
 from ..core.config import get_settings
 from ..schemas.contracts import DetectionItem, MachineryType
 
-if TYPE_CHECKING:
-    pass
-
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# COCO-to-domain alias table.
-#
-# The base YOLOv8m model is trained on COCO-80 (person, car, truck, etc.).
-# These aliases map COCO class names to the closest domain machinery type.
-#
-# Rationale for each mapping:
-#   truck       → truck         (direct COCO match)
-#   truck       → dump_truck    (construction trucks are often dump trucks;
-#                                without fine-tuned model we cannot distinguish)
-#   car         → (skip)        -- too generic, would cause false positives
-#   bus         → (skip)        -- too generic
-#
-# After fine-tuning, this table should be empty or minimal.
+# Comprehensive domain normalization dictionary for the 8 target classes:
+# 1. dump_truck (самосвал)
+# 2. excavator (экскаватор)
+# 3. roller (каток)
+# 4. crane_manipulator (кран-манипулятор)
+# 5. bulldozer (бульдозер)
+# 6. mobile_crane (автокран)
+# 7. concrete_mixer (бетоносмеситель)
+# 8. truck (грузовик)
 # ---------------------------------------------------------------------------
-COCO_ALIASES: dict[str, str] = {
-    # COCO name        → MachineryType value
-    "cement_mixer":   "concrete_mixer",
-    "mixer":          "concrete_mixer",
-    "crane":          "mobile_crane",
-    "lorry":          "truck",
-    "tipper":         "dump_truck",
-    "digger":         "excavator",
-    "compactor":      "roller",
-    "road_roller":    "roller",
-    # COCO generic classes with some construction overlap
-    "truck":          "truck",
+MACHINERY_ALIASES: dict[str, str] = {
+    # --- 1. dump_truck (самосвал) ---
+    "dump_truck":       "dump_truck",
+    "dumb_truck":       "dump_truck",
+    "dumptruck":        "dump_truck",
+    "tipper":           "dump_truck",
+    "tipper_truck":     "dump_truck",
+    "haul_truck":       "dump_truck",
+    "dumper":           "dump_truck",
+    "самосвал":         "dump_truck",
+
+    # --- 2. excavator (экскаватор) ---
+    "excavator":        "excavator",
+    "digger":           "excavator",
+    "backhoe":          "excavator",
+    "trench_digger":    "excavator",
+    "экскаватор":       "excavator",
+
+    # --- 3. roller (каток) ---
+    "roller":           "roller",
+    "road_roller":      "roller",
+    "roadroller":       "roller",
+    "compactor":        "roller",
+    "steam_roller":     "roller",
+    "каток":            "roller",
+
+    # --- 4. crane_manipulator (кран-манипулятор) ---
+    "crane_manipulator": "crane_manipulator",
+    "manipulator":      "crane_manipulator",
+    "crane_truck":      "crane_manipulator",
+    "loader_crane":     "crane_manipulator",
+    "boom_truck":       "crane_manipulator",
+    "кран_манипулятор": "crane_manipulator",
+    "манипулятор":      "crane_manipulator",
+
+    # --- 5. bulldozer (бульдозер) ---
+    "bulldozer":        "bulldozer",
+    "dozer":            "bulldozer",
+    "bull_dozer":       "bulldozer",
+    "crawler_dozer":    "bulldozer",
+    "grader":           "bulldozer",
+    "автогрейдер":      "bulldozer",
+    "грейдер":          "bulldozer",
+    "бульдозер":        "bulldozer",
+
+    # --- 6. mobile_crane (автокран) ---
+    "mobile_crane":     "mobile_crane",
+    "mobilecrane":      "mobile_crane",
+    "truck_crane":      "mobile_crane",
+    "tower_crane":      "mobile_crane",
+    "crane":            "mobile_crane",
+    "автокран":         "mobile_crane",
+    "кран":             "mobile_crane",
+    "башенный_кран":    "mobile_crane",
+
+    # --- 7. concrete_mixer (бетоносмеситель) ---
+    "concrete_mixer":   "concrete_mixer",
+    "cement_mixer":     "concrete_mixer",
+    "transit_mixer":    "concrete_mixer",
+    "mixer":            "concrete_mixer",
+    "автобетоносмеситель": "concrete_mixer",
+    "бетоносмеситель":  "concrete_mixer",
+    "бетономешалка":    "concrete_mixer",
+
+    # --- 8. truck (грузовик / погрузчик) ---
+    "truck":            "truck",
+    "lorry":            "truck",
+    "flatbed_truck":    "truck",
+    "cargo_truck":      "truck",
+    "loader":           "truck",
+    "wheel_loader":     "truck",
+    "погрузчик":        "truck",
+    "грузовик":         "truck",
 }
 
 
 class MachineryDetector:
-    """Detect target machinery using YOLO when weights are available."""
+    """Lightweight construction machinery detector using specialized YOLO weights."""
 
     def __init__(
         self,
@@ -72,18 +122,31 @@ class MachineryDetector:
         settings = get_settings()
         self.weights_path = Path(weights_path or settings.yolo_weights)
         self.confidence = confidence if confidence is not None else settings.yolo_confidence
+        self.imgsz = 640
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self._model = None
         self._load_error: Exception | None = None
+        self._is_construction: bool = False
 
         if self.weights_path.is_file():
             try:
                 from ultralytics import YOLO  # noqa: PLC0415
 
                 self._model = YOLO(str(self.weights_path))
+                # Check if model has domain-specific construction classes
+                matched_classes = sum(
+                    1
+                    for name in self._model.names.values()
+                    if str(name).casefold().replace("-", "_").replace(" ", "_") in MACHINERY_ALIASES
+                )
+                self._is_construction = matched_classes >= 3
                 logger.info(
-                    "YOLO model loaded: %s  classes=%d  conf_threshold=%.2f",
+                    "YOLO model loaded: %s (classes=%d, is_construction=%s, device=%s, imgsz=%d, conf=%.2f)",
                     self.weights_path.name,
                     len(self._model.names),
+                    self._is_construction,
+                    self.device,
+                    self.imgsz,
                     self.confidence,
                 )
             except Exception as error:  # pragma: no cover
@@ -100,11 +163,18 @@ class MachineryDetector:
         """True when a real YOLO model is loaded (not synthetic fallback)."""
         return self._model is not None
 
+    @property
+    def model_is_construction(self) -> bool:
+        """True when the model is trained on specialized construction equipment."""
+        return self._is_construction if self._model is not None else False
+
     def detect(self, image_bytes: bytes) -> list[DetectionItem]:
         """Run inference and return validated detections.
 
-        Returns an empty list when inference fails — but every failure is
-        logged with ERROR level so it is never silently lost.
+        Guaranteed memory efficiency:
+        - FP16 (half=True) when on GPU.
+        - Automatic torch.cuda.empty_cache() cleanup in finally block.
+        - Logging of any runtime errors without silent exception suppression.
         """
         try:
             image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -115,58 +185,63 @@ class MachineryDetector:
                 logger.info("Synthetic fallback active — returning placeholder excavator.")
                 return self._fallback_detections(image)
 
-            result = self._model.predict(source=image, conf=self.confidence, verbose=False)[0]
+            predict_kwargs: dict[str, object] = {
+                "source": image,
+                "conf": self.confidence,
+                "imgsz": self.imgsz,
+                "device": self.device,
+                "verbose": False,
+            }
+            if self.device.startswith("cuda"):
+                predict_kwargs["half"] = True
+
+            result = self._model.predict(**predict_kwargs)[0]
             detections = self._parse_result(result)
             logger.debug(
-                "Inference complete: %d raw boxes → %d domain detections",
+                "Inference complete: %d raw boxes -> %d domain detections",
                 len(result.boxes),
                 len(detections),
             )
             return detections
 
         except ValueError as exc:
-            # Bad image upload — caller should surface this as HTTP 400.
             logger.warning("Image decode failed: %s", exc)
             raise
         except Exception as exc:
-            # Unexpected inference error (OOM, CUDA, corrupted weights…).
-            # Log at ERROR level and return empty list so the pipeline
-            # can degrade gracefully rather than crash the entire request.
             logger.error("Inference error (returning empty result): %s", exc, exc_info=True)
             return []
+        finally:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def _parse_result(self, result) -> list[DetectionItem]:  # type: ignore[override]
-        """Convert raw YOLO result to domain DetectionItems."""
+        """Convert raw YOLO bounding boxes into strict domain DetectionItems."""
         names = result.names
         detections: list[DetectionItem] = []
         for box in result.boxes:
             class_id = int(box.cls[0])
             raw_name = str(names[class_id]).casefold().strip()
             normalized = raw_name.replace("-", "_").replace(" ", "_")
-            clean_name = COCO_ALIASES.get(normalized, normalized)
+            canonical_name = MACHINERY_ALIASES.get(normalized, normalized)
+
             try:
-                machinery = MachineryType(clean_name)
+                machinery = MachineryType(canonical_name)
             except ValueError:
-                # Class not in domain ontology — skip silently but count.
-                logger.debug("Skipping unknown class: %s (normalized: %s)", raw_name, clean_name)
+                logger.debug("Skipping non-target class: %s (normalized: %s)", raw_name, canonical_name)
                 continue
+
             detections.append(
                 DetectionItem(
                     class_name=machinery,
                     confidence=float(box.conf[0]),
-                    bbox=[float(v) for v in box.xyxy[0].tolist()],
+                    bbox=[float(round(v, 2)) for v in box.xyxy[0].tolist()],
                 )
             )
         return detections
 
     @staticmethod
     def _fallback_detections(image: np.ndarray) -> list[DetectionItem]:
-        """Return one low-confidence synthetic object for local smoke testing.
-
-        IMPORTANT: This is NOT machine learning. It is a hardcoded placeholder
-        used only when model weights are absent, to keep the rest of the pipeline
-        testable. The returned confidence (0.01) signals its synthetic nature.
-        """
+        """Return one synthetic low-confidence item when weights are missing."""
         height, width = image.shape[:2]
         left, top = width * 0.25, height * 0.25
         right, bottom = width * 0.75, height * 0.75

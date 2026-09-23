@@ -20,6 +20,7 @@ import cv2
 import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from ...db.models import IncidentAlert, MachineryDetection
 from ...db.session import get_db
@@ -121,9 +122,9 @@ async def analyze(
     if img_array is None:
         raise HTTPException(status_code=400, detail="Uploaded file is not a readable image")
 
-    # Run detector (uses decoded array internally).
+    # Run detector in threadpool to avoid blocking event loop
     try:
-        detections = detector.detect(image_bytes)
+        detections = await run_in_threadpool(detector.detect, image_bytes)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -132,7 +133,7 @@ async def analyze(
         stage_name,
         [item.class_name.value for item in detections],
         model_is_real=detector.is_real_model,
-        model_is_construction=False,  # set to True after fine-tuning
+        model_is_construction=detector.model_is_construction,
     )
     response.detections = detections
 
@@ -142,8 +143,8 @@ async def analyze(
     if photo_date:
         response.timestamp = photo_date
 
-    # Save annotated debug image and add URL to response.
-    debug_url = _annotate_and_save(img_array, detections)
+    # Save annotated debug image in threadpool and add URL to response.
+    debug_url = await run_in_threadpool(_annotate_and_save, img_array, detections)
     response.debug_image_url = debug_url
 
     # Persist to DB (non-blocking on failure).
@@ -174,7 +175,7 @@ async def batch_analyze(
             continue
 
         try:
-            detections = detector.detect(image_bytes)
+            detections = await run_in_threadpool(detector.detect, image_bytes)
         except ValueError:
             detections = []
 
@@ -182,10 +183,10 @@ async def batch_analyze(
             stage_name,
             [item.class_name.value for item in detections],
             model_is_real=detector.is_real_model,
-            model_is_construction=False,
+            model_is_construction=detector.model_is_construction,
         )
         result.detections = detections
-        result.debug_image_url = _annotate_and_save(img_array, detections)
+        result.debug_image_url = await run_in_threadpool(_annotate_and_save, img_array, detections)
         photo_date = extract_photo_date(image_bytes, image.filename)
         result.photo_timestamp = photo_date
         if photo_date:
@@ -208,7 +209,7 @@ async def batch_analyze(
         all_detected_classes,
         total_images=len(individual_results),
         model_is_real=detector.is_real_model,
-        model_is_construction=False,
+        model_is_construction=detector.model_is_construction,
     )
 
     # Persist the unified batch incident record as well

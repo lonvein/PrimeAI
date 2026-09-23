@@ -46,7 +46,7 @@ def evaluate_compliance(
     detected_classes: list[str],
     *,
     model_is_real: bool = True,
-    model_is_construction: bool = False,
+    model_is_construction: bool = True,
 ) -> AnalyzeResponse:
     """Compare detected machinery counts with the active stage requirements.
 
@@ -184,7 +184,7 @@ def evaluate_batch_compliance(
     total_images: int,
     *,
     model_is_real: bool = True,
-    model_is_construction: bool = False,
+    model_is_construction: bool = True,
 ) -> tuple[IncidentStatus, str, ObservationQuality, list[str], list[str], dict[str, int]]:
     """Compare aggregated machinery detections from multiple photos against active stage requirements.
 
