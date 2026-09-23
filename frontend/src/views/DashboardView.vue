@@ -1,6 +1,5 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import Navbar from '../components/Navbar.vue'
 import IncidentCard from '../components/IncidentCard.vue'
 import UploadModal from '../components/UploadModal.vue'
 import PhotoViewer from '../components/PhotoViewer.vue'
@@ -63,8 +62,6 @@ onMounted(loadAnalytics)
 
 <template>
   <main class="dashboard">
-    <Navbar />
-
     <section class="content">
       <header class="hero">
         <h1>Build Eye AI</h1>

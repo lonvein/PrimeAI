@@ -74,6 +74,27 @@ class AnalyzeResponse(BaseModel):
     model_is_construction_specific: bool = False
     # NEW: optional URL of the annotated debug image saved by the backend.
     debug_image_url: str | None = None
+    # NEW: extracted timestamp from photo EXIF metadata or filename (if available).
+    photo_timestamp: datetime | None = None
+
+
+class BatchAnalyzeResponse(BaseModel):
+    """Result of batch multi-photo analysis with aggregated site-level compliance.
+
+    Aggregates detections across multiple camera angles/sectors to solve
+    the partial observability problem (limited camera field of view).
+    """
+
+    total_images: int
+    active_stage: str
+    overall_status: IncidentStatus
+    overall_explanation: str
+    overall_quality: ObservationQuality
+    total_detections_count: int
+    machinery_summary: dict[str, int]
+    missing_machinery: list[str]
+    unexpected_machinery: list[str]
+    items: list[AnalyzeResponse]
 
 
 class ScheduleRow(BaseModel):

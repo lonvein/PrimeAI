@@ -176,3 +176,113 @@ def evaluate_compliance(
         observation_quality=observation_quality,
         model_is_construction_specific=model_is_construction,
     )
+
+
+def evaluate_batch_compliance(
+    stage_name: str,
+    all_detected_classes: list[str],
+    total_images: int,
+    *,
+    model_is_real: bool = True,
+    model_is_construction: bool = False,
+) -> tuple[IncidentStatus, str, ObservationQuality, list[str], list[str], dict[str, int]]:
+    """Compare aggregated machinery detections from multiple photos against active stage requirements.
+
+    Addresses the partial observability problem: summing observations across
+    multiple camera angles gives a complete site picture.
+
+    Returns
+    -------
+    tuple of (status, explanation, observation_quality, missing, unexpected, counts_summary)
+    """
+    rules = get_stage_rules(stage_name)
+    normalized: list[MachineryType] = []
+    for class_name in all_detected_classes:
+        try:
+            normalized.append(MachineryType(class_name.casefold().strip()))
+        except ValueError:
+            continue
+
+    counts = Counter(normalized)
+    counts_summary = {k.value: v for k, v in sorted(counts.items(), key=lambda item: item[0].value)}
+
+    missing = [
+        machinery.value
+        for machinery, required_count in rules.required_machinery.items()
+        if counts[machinery] < required_count
+    ]
+    unexpected = [
+        machinery.value
+        for machinery in sorted(set(normalized), key=lambda m: m.value)
+        if machinery not in rules.required_machinery
+        and machinery not in rules.optional_machinery
+    ]
+
+    # Observation quality across multiple perspectives:
+    if not model_is_real:
+        quality = ObservationQuality.LOW
+    elif total_images >= 2 and len(normalized) > 0:
+        quality = ObservationQuality.HIGH
+    elif missing and not model_is_construction:
+        quality = ObservationQuality.MEDIUM
+    elif normalized:
+        quality = ObservationQuality.HIGH
+    else:
+        quality = ObservationQuality.MEDIUM
+
+    observed_str = (
+        ", ".join(f"{k}: {v}" for k, v in counts_summary.items())
+        if counts_summary
+        else "техника не обнаружена"
+    )
+
+    if not model_is_real:
+        status = IncidentStatus.WARNING
+        explanation = (
+            f"Модель детекции не загружена. Агрегированный анализ {total_images} снимков "
+            f"для этапа «{rules.stage_name}» выполнен в тестовом режиме."
+        )
+    elif not rules.required_machinery:
+        status = IncidentStatus.WARNING
+        explanation = (
+            f"Этап «{rules.stage_name}» не найден в нормативном справочнике. "
+            "Автоматическое подтверждение соответствия невозможно; добавьте правило этапа."
+        )
+    elif missing and model_is_construction:
+        status = IncidentStatus.CRITICAL
+        explanation = (
+            f"Комплексный мониторинг по {total_images} снимкам выявил дефицит техники "
+            f"для этапа «{rules.stage_name}». Не обнаружено: {', '.join(missing)}. "
+            f"Фактически зафиксировано: {observed_str}."
+        )
+    elif missing and not model_is_construction:
+        status = IncidentStatus.WARNING
+        explanation = (
+            f"По результатам анализа {total_images} снимков для этапа «{rules.stage_name}» "
+            f"нормативная техника ({', '.join(missing)}) зафиксирована не полностью. "
+            f"Обнаружено: {observed_str}. Используется базовая модель (COCO); "
+            "рекомендуется визуальная верификация."
+        )
+    elif unexpected:
+        status = IncidentStatus.WARNING
+        explanation = (
+            f"По {total_images} снимкам вся нормативная техника для этапа «{rules.stage_name}» "
+            f"присутствует ({observed_str}), но зафиксирована нетипичная техника: {', '.join(unexpected)}."
+        )
+    else:
+        status = IncidentStatus.OK
+        explanation = (
+            f"Комплексный мониторинг по {total_images} снимкам подтверждает 100% соответствие "
+            f"плану для этапа «{rules.stage_name}». Зафиксировано: {observed_str}."
+        )
+
+    logger.info(
+        "Batch compliance: stage=%r  status=%s  quality=%s  images=%d  observed=%s",
+        rules.stage_name,
+        status.value,
+        quality.value,
+        total_images,
+        observed_str,
+    )
+
+    return status, explanation, quality, missing, unexpected, counts_summary

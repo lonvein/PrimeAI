@@ -1,0 +1,15 @@
+# Ultralytics YOLO format for Build Eye AI Construction Machinery
+path: ml/datasets
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: excavator
+  1: dump_truck
+  2: bulldozer
+  3: concrete_mixer
+  4: mobile_crane
+  5: crane_manipulator
+  6: roller
+  7: truck

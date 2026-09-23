@@ -23,9 +23,10 @@ from sqlalchemy.orm import Session
 
 from ...db.models import IncidentAlert, MachineryDetection
 from ...db.session import get_db
-from ...schemas.contracts import AnalyzeResponse, ObservationQuality
+from ...schemas.contracts import AnalyzeResponse, BatchAnalyzeResponse, ObservationQuality
 from ...services.detector import MachineryDetector
-from ...services.matcher import evaluate_compliance
+from ...services.exif_utils import extract_photo_date
+from ...services.matcher import evaluate_batch_compliance, evaluate_compliance
 from ...core.config import get_settings
 
 router = APIRouter(tags=["monitoring"])
@@ -135,6 +136,12 @@ async def analyze(
     )
     response.detections = detections
 
+    # Extract capture timestamp from EXIF or filename if available.
+    photo_date = extract_photo_date(image_bytes, image.filename)
+    response.photo_timestamp = photo_date
+    if photo_date:
+        response.timestamp = photo_date
+
     # Save annotated debug image and add URL to response.
     debug_url = _annotate_and_save(img_array, detections)
     response.debug_image_url = debug_url
@@ -145,18 +152,20 @@ async def analyze(
     return response
 
 
-@router.post("/batch-analyze", response_model=list[AnalyzeResponse])
+@router.post("/batch-analyze", response_model=BatchAnalyzeResponse)
 async def batch_analyze(
     images: list[UploadFile] = File(...),
     stage_name: str = Form(...),
     db: Session = Depends(get_db),
-) -> list[AnalyzeResponse]:
-    """Analyze multiple images using one active stage.
+) -> BatchAnalyzeResponse:
+    """Analyze multiple images covering different angles/sectors of the site.
 
-    Each image is processed independently. Failures on individual images
-    are returned as WARNING responses, not hard errors.
+    Aggregates detections across all photos to address partial camera visibility,
+    then returns both the per-photo breakdowns and the unified site-level compliance.
     """
-    results: list[AnalyzeResponse] = []
+    individual_results: list[AnalyzeResponse] = []
+    all_detected_classes: list[str] = []
+
     for image in images:
         image_bytes = await image.read()
         img_array = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -177,7 +186,56 @@ async def batch_analyze(
         )
         result.detections = detections
         result.debug_image_url = _annotate_and_save(img_array, detections)
-        _persist_analysis(db, result, detections)
-        results.append(result)
+        photo_date = extract_photo_date(image_bytes, image.filename)
+        result.photo_timestamp = photo_date
+        if photo_date:
+            result.timestamp = photo_date
 
-    return results
+        _persist_analysis(db, result, detections)
+        individual_results.append(result)
+        all_detected_classes.extend([item.class_name.value for item in detections])
+
+    # Evaluate aggregate compliance across the whole site (union of camera observations)
+    (
+        overall_status,
+        overall_explanation,
+        overall_quality,
+        missing_machinery,
+        unexpected_machinery,
+        machinery_summary,
+    ) = evaluate_batch_compliance(
+        stage_name,
+        all_detected_classes,
+        total_images=len(individual_results),
+        model_is_real=detector.is_real_model,
+        model_is_construction=False,
+    )
+
+    # Persist the unified batch incident record as well
+    batch_incident = IncidentAlert(
+        stage_name=stage_name,
+        status=overall_status.value,
+        explanation=f"[Пакетный мониторинг {len(individual_results)} ракурсов] {overall_explanation}",
+        observation_quality=overall_quality.value,
+        missing_machinery=json.dumps(missing_machinery),
+        unexpected_machinery=json.dumps(unexpected_machinery),
+    )
+    try:
+        db.add(batch_incident)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("Failed to persist batch incident: %s", exc)
+
+    return BatchAnalyzeResponse(
+        total_images=len(individual_results),
+        active_stage=stage_name,
+        overall_status=overall_status,
+        overall_explanation=overall_explanation,
+        overall_quality=overall_quality,
+        total_detections_count=len(all_detected_classes),
+        machinery_summary=machinery_summary,
+        missing_machinery=missing_machinery,
+        unexpected_machinery=unexpected_machinery,
+        items=individual_results,
+    )
