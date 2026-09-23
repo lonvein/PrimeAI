@@ -94,6 +94,7 @@ class AnalyzeResponse(BaseModel):
     photo_timestamp: datetime | None = None
     # Date auto-detected or specified (YYYY-MM-DD)
     detected_date: str | None = None
+    analyzed_date: str | None = None
     # Active stage name (synced with active_stage)
     stage_name: str | None = None
     # Planned period for active stage {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}

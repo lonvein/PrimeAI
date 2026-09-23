@@ -36,22 +36,53 @@ const canvasRef = ref(null)
 const naturalWidth = ref(0)
 const naturalHeight = ref(0)
 const showDebugImage = ref(true) // toggle between original+canvas vs debug image
+const cachedImage = ref(null)
 
 /**
- * Draws bounding boxes on the canvas overlaying the uploaded image.
+ * Loads an image from a URL or ObjectURL and stores it in cachedImage.
+ */
+function loadImage(url) {
+  if (!url) return
+  const img = new Image()
+  img.crossOrigin = 'anonymous'
+  img.onload = () => {
+    cachedImage.value = img
+    renderCanvas()
+  }
+  img.src = url
+}
+
+function resolveImageSource() {
+  if (props.imageFile) {
+    const url = URL.createObjectURL(props.imageFile)
+    loadImage(url)
+  } else if (props.rawImageUrl) {
+    loadImage(props.rawImageUrl)
+  } else if (activeAnnotatedUrl.value) {
+    loadImage(activeAnnotatedUrl.value)
+  }
+}
+
+/**
+ * Draws bounding boxes on the canvas overlaying the cached image.
  * This is used when showDebugImage is false (client-side overlay).
  */
-function drawBoxes(img) {
+function renderCanvas() {
   const canvas = canvasRef.value
+  const img = cachedImage.value
   if (!canvas || !img) return
 
   const ctx = canvas.getContext('2d')
-  canvas.width = img.naturalWidth
-  canvas.height = img.naturalHeight
-  naturalWidth.value = img.naturalWidth
-  naturalHeight.value = img.naturalHeight
+  const width = img.naturalWidth || img.width || 640
+  const height = img.naturalHeight || img.height || 480
 
-  ctx.drawImage(img, 0, 0)
+  canvas.width = width
+  canvas.height = height
+  naturalWidth.value = width
+  naturalHeight.value = height
+
+  ctx.clearRect(0, 0, width, height)
+  ctx.drawImage(img, 0, 0, width, height)
 
   for (const det of props.detections) {
     const [x1, y1, x2, y2] = det.bbox
@@ -78,21 +109,37 @@ function drawBoxes(img) {
   }
 }
 
-// When imageFile changes, draw on canvas.
+// Watchers
 watch(
-  () => props.imageFile,
-  async (file) => {
-    if (!file) return
-    await nextTick()
-    const img = new Image()
-    img.onload = () => drawBoxes(img)
-    img.src = URL.createObjectURL(file)
+  [() => props.imageFile, () => props.rawImageUrl, () => activeAnnotatedUrl.value],
+  () => {
+    resolveImageSource()
   },
+  { immediate: true },
+)
+
+watch(showDebugImage, async (isServer) => {
+  if (!isServer) {
+    await nextTick()
+    if (!cachedImage.value) {
+      resolveImageSource()
+    } else {
+      renderCanvas()
+    }
+  }
+})
+
+watch(
+  () => props.detections,
+  () => {
+    renderCanvas()
+  },
+  { deep: true },
 )
 </script>
 
 <template>
-  <div class="photo-viewer" v-if="imageFile || activeAnnotatedUrl">
+  <div class="photo-viewer" v-if="imageFile || activeAnnotatedUrl || rawImageUrl">
     <div class="viewer-header">
       <div class="header-left">
         <h3>📷 Результат анализа</h3>
@@ -100,25 +147,27 @@ watch(
           v-if="rawImageUrl"
           :href="rawImageUrl"
           target="_blank"
+          rel="noopener noreferrer"
           class="raw-link"
+          @click.stop
           title="Открыть исходный файл без разметки (доказательная база ДГП)"
         >
           🔍 Исходный снимок (RAW)
         </a>
       </div>
-      <label v-if="activeAnnotatedUrl && imageFile" class="toggle">
+      <label v-if="activeAnnotatedUrl && (imageFile || rawImageUrl)" class="toggle">
         <input type="checkbox" v-model="showDebugImage" />
         Серверная разметка
       </label>
     </div>
 
     <!-- Option 1: Server-side annotated image -->
-    <div v-if="showDebugImage && activeAnnotatedUrl" class="image-container">
+    <div v-show="showDebugImage && activeAnnotatedUrl" class="image-container">
       <img :src="activeAnnotatedUrl" alt="Annotated construction site photo" class="result-image" />
     </div>
 
     <!-- Option 2: Client-side canvas overlay -->
-    <div v-else-if="imageFile" class="image-container">
+    <div v-show="!showDebugImage || !activeAnnotatedUrl" class="image-container">
       <canvas ref="canvasRef" class="result-image"></canvas>
     </div>
 
@@ -165,6 +214,7 @@ watch(
   border-radius: 4px;
   font-weight: 600;
   transition: background 0.2s;
+  cursor: pointer;
 }
 .raw-link:hover {
   background: #d4ecdc;

@@ -68,23 +68,50 @@ def test_analyze_date_outside_schedule_returns_warning():
     assert data["stage_name"] == "Вне графика СМР"
     assert "2028-06-15" in data["explanation"]
     assert "выходит за рамки загруженного графика СМР" in data["explanation"]
+    assert "Ближайший этап:" in data["explanation"]
+    assert data["analyzed_date"] == "2028-06-15"
 
 
-def test_analyze_demo_preset_norm():
-    """Demo preset 'norm' guarantees status OK and complete plan match."""
-    file_bytes = _make_dummy_image_bytes()
+def test_analyze_preset_endpoint_norm():
+    """Test POST /api/v1/analyze-preset with preset_type=norm."""
     response = client.post(
-        "/api/v1/analyze",
-        data={"preset": "norm", "date": "2026-09-05"},
-        files={"image": ("preset_norm.png", file_bytes, "image/png")},
+        "/api/v1/analyze-preset?preset_type=norm&selected_date=2026-09-05"
     )
     assert response.status_code == 200
     data = response.json()
-
-    assert data["compliance_status"] == "OK"
     assert data["status"] == "OK"
-    assert data["machinery_fact"] == data["machinery_plan"]
-    assert "соответствует" in data["explanation"].lower()
+    assert data["compliance_status"] == "OK"
+    assert data["analyzed_date"] == "2026-09-05"
+    assert data["raw_image_url"] is not None
+    assert data["annotated_image_url"] is not None
+    assert "снос" in data["stage_name"].lower() or "расчист" in data["stage_name"].lower()
+
+
+def test_analyze_preset_endpoint_critical():
+    """Test POST /api/v1/analyze-preset with preset_type=critical."""
+    response = client.post(
+        "/api/v1/analyze-preset?preset_type=critical&selected_date=2026-09-20"
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "CRITICAL"
+    assert data["compliance_status"] == "CRITICAL"
+    assert data["analyzed_date"] == "2026-09-20"
+    assert "dump_truck" in data["missing_machinery"]
+
+
+def test_analyze_selected_date_priority():
+    """selected_date must take priority over date parameter."""
+    file_bytes = _make_dummy_image_bytes()
+    response = client.post(
+        "/api/v1/analyze",
+        data={"selected_date": "2026-09-05", "date": "2026-09-20"},
+        files={"image": ("site_2026-09-20.png", file_bytes, "image/png")},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["analyzed_date"] == "2026-09-05"
+    assert "снос" in data["stage_name"].lower() or "расчист" in data["stage_name"].lower()
 
 
 def test_presets_endpoint():
@@ -96,3 +123,4 @@ def test_presets_endpoint():
     ids = [p["id"] for p in presets]
     assert "norm" in ids
     assert "critical" in ids
+

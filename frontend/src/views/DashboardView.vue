@@ -56,6 +56,7 @@ async function runAnalysis(file, customDate = null, preset = null) {
   }
   const dateToSend = customDate || selectedDate.value
   if (dateToSend) {
+    formData.append('selected_date', dateToSend)
     formData.append('date', dateToSend)
   }
   if (preset) {
@@ -68,7 +69,9 @@ async function runAnalysis(file, customDate = null, preset = null) {
     if (file) {
       localFile.value = file
     }
-    if (data.detected_date) {
+    if (data.analyzed_date) {
+      selectedDate.value = data.analyzed_date
+    } else if (data.detected_date) {
       selectedDate.value = data.detected_date
     }
     loadAnalytics()
@@ -97,26 +100,41 @@ function handleDrop(e) {
 async function handleDateChange() {
   if (localFile.value) {
     await runAnalysis(localFile.value, selectedDate.value)
+  } else if (analysis.value) {
+    const currentPreset = analysis.value.status === 'OK' ? 'norm' : 'critical'
+    try {
+      isLoading.value = true
+      errorMessage.value = ''
+      const { data } = await api.post(`/analyze-preset?preset_type=${currentPreset}&selected_date=${selectedDate.value}`)
+      analysis.value = data
+      if (data.analyzed_date) {
+        selectedDate.value = data.analyzed_date
+      }
+    } catch (e) {
+      errorMessage.value = 'Ошибка при обновлении даты: ' + (e.response?.data?.detail || e.message || e)
+    } finally {
+      isLoading.value = false
+    }
   }
 }
 
 async function loadPreset(presetKey) {
   isLoading.value = true
   errorMessage.value = ''
+  localFile.value = null
+  const date = presetKey === 'norm' ? '2026-09-05' : '2026-09-20'
   try {
-    // Fetch preset image asset
-    const imgUrl = '/static/demo/site_2026-09-20_deficit.png'
-    const res = await fetch(imgUrl)
-    const blob = await res.blob()
-    const filename = presetKey === 'norm' ? 'site_2026-09-05_norm.png' : 'site_2026-09-20_deficit.png'
-    const file = new File([blob], filename, { type: 'image/png' })
-
-    const date = presetKey === 'norm' ? '2026-09-05' : '2026-09-20'
-    selectedDate.value = date
-
-    await runAnalysis(file, date, presetKey)
+    const { data } = await api.post(`/analyze-preset?preset_type=${presetKey}&selected_date=${date}`)
+    analysis.value = data
+    if (data.analyzed_date) {
+      selectedDate.value = data.analyzed_date
+    } else if (data.detected_date) {
+      selectedDate.value = data.detected_date
+    }
+    loadAnalytics()
   } catch (e) {
-    errorMessage.value = 'Не удалось загрузить демо-снимок: ' + (e.message || e)
+    errorMessage.value = 'Не удалось загрузить демо-пресет: ' + (e.response?.data?.detail || e.message || e)
+  } finally {
     isLoading.value = false
   }
 }

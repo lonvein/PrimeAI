@@ -107,6 +107,26 @@ def _parse_date(value: Any) -> datetime | None:
     return None
 
 
+def to_date(value: Any) -> date | None:
+    """Normalize any date/datetime/string representation to datetime.date."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, pd.Timestamp):
+        return value.to_pydatetime().date()
+    if isinstance(value, str):
+        clean_val = value.strip().split("T")[0].split(" ")[0]
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%Y/%m/%d", "%d/%m/%Y", "%m/%d/%Y"):
+            try:
+                return datetime.strptime(clean_val, fmt).date()
+            except ValueError:
+                continue
+    return None
+
+
 def parse_schedule(file_bytes: bytes) -> list[dict[str, Any]]:
     """Read the first Excel sheet into JSON-compatible row dictionaries.
 
@@ -177,16 +197,24 @@ def parse_schedule_structured(file_bytes: bytes) -> list[ScheduleRow]:
     return rows
 
 
-def get_active_stages(schedule: list[ScheduleRow], query_date: datetime) -> list[ScheduleRow]:
+def get_active_stages(
+    schedule: list[ScheduleRow],
+    query_date: datetime | date | str,
+) -> list[ScheduleRow]:
     """Return all stages whose date interval contains query_date.
 
-    A stage with no dates is never returned as active.
+    Normalized to datetime.date to avoid time-of-day or type mismatch errors.
     """
+    target = to_date(query_date)
+    if target is None:
+        return []
+
     active = []
     for row in schedule:
-        if row.date_start and row.date_end:
-            if row.date_start <= query_date <= row.date_end:
-                active.append(row)
+        s_start = to_date(row.date_start)
+        s_end = to_date(row.date_end)
+        if s_start and s_end and s_start <= target <= s_end:
+            active.append(row)
     return active
 
 
@@ -284,18 +312,47 @@ def get_active_stage_by_date(target_date: datetime | date | str) -> ScheduleRow 
     """Find the active stage from the loaded schedule for a given date.
 
     If multiple stages overlap on target_date, returns the one that started
-    most recently (highest date_start).
+    most recently (highest date_start). All comparisons are done as datetime.date.
     """
-    dt = _parse_date(target_date)
-    if dt is None:
+    target = to_date(target_date)
+    if target is None:
         return None
 
     schedule = get_loaded_schedule()
-    active = get_active_stages(schedule, dt)
+    active = get_active_stages(schedule, target)
     if not active:
         return None
 
-    return max(active, key=lambda r: r.date_start or datetime.min)
+    return max(active, key=lambda r: to_date(r.date_start) or date.min)
+
+
+def get_nearest_stage(target_date: datetime | date | str) -> tuple[ScheduleRow, int] | None:
+    """Find the chronologically closest stage to target_date when none is active.
+
+    Returns tuple (nearest_stage, days_distance) or None if schedule is empty.
+    Positive distance = target is before stage; negative = target is after stage.
+    """
+    target = to_date(target_date)
+    if target is None:
+        return None
+
+    schedule = get_loaded_schedule()
+    valid_stages = [r for r in schedule if to_date(r.date_start) and to_date(r.date_end)]
+    if not valid_stages:
+        return None
+
+    def distance_to_stage(row: ScheduleRow) -> int:
+        s_start = to_date(row.date_start)
+        s_end = to_date(row.date_end)
+        if s_start <= target <= s_end:
+            return 0
+        if target < s_start:
+            return (s_start - target).days
+        return (target - s_end).days
+
+    nearest = min(valid_stages, key=distance_to_stage)
+    dist = distance_to_stage(nearest)
+    return nearest, dist
 
 
 # ---------------------------------------------------------------------------

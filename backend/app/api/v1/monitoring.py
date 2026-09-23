@@ -19,7 +19,7 @@ from uuid import uuid4
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -40,7 +40,9 @@ from ...services.schedule_parser import (
     _parse_date,
     get_active_stage_by_date,
     get_loaded_schedule,
+    get_nearest_stage,
     get_schedule_date_range,
+    to_date,
 )
 from ...core.config import get_settings
 
@@ -170,46 +172,40 @@ def get_presets() -> list[dict[str, Any]]:
     ]
 
 
-@router.post("/analyze", response_model=AnalyzeResponse)
-async def analyze(
-    image: UploadFile = File(...),
-    stage_name: str | None = Form(default=None),
-    date: str | None = Form(default=None),
-    preset: str | None = Form(default=None),
-    db: Session = Depends(get_db),
+async def _process_analysis_pipeline(
+    image_bytes: bytes,
+    filename: str | None,
+    stage_name: str | None,
+    date_param: str | None,
+    preset: str | None,
+    db: Session,
 ) -> AnalyzeResponse:
-    """Analyze one site photo against active construction stage.
-
-    Auto-matching pipeline:
-    1. Extract date from explicit `date` form param, EXIF metadata, or filename.
-    2. Auto-match active stage from loaded schedule via get_active_stage_by_date(dt).
-    3. If date is outside schedule, return status WARNING:
-       "Дата съемки {date} выходит за рамки загруженного графика СМР".
-    4. Detect construction machinery using YOLO with Class-Agnostic NMS & containment suppression.
-    5. Match Plan vs Fact and return typed AnalyzeResponse.
-    """
-    image_bytes = await image.read()
+    """Core analysis pipeline: saving RAW, decoding, detecting, matching schedule, and saving preview."""
     file_uuid = uuid4().hex
 
     # 1. Save pristine raw image first (preserves EXIF and original bytes)
-    _, raw_url = await run_in_threadpool(_save_raw_image, image_bytes, image.filename, file_uuid)
+    _, raw_url = await run_in_threadpool(_save_raw_image, image_bytes, filename, file_uuid)
 
     # Decode image once for inference and annotation.
     img_array = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
     if img_array is None:
         raise HTTPException(status_code=400, detail="Uploaded file is not a readable image")
 
-    # 2. Extract or resolve target date
-    explicit_dt = _parse_date(date) if date else None
-    photo_date = extract_photo_date(image_bytes, image.filename)
-    target_dt = explicit_dt or photo_date or datetime.now()
-    detected_date_str = target_dt.strftime("%Y-%m-%d")
+    # 2. Extract or resolve target date with strict precedence:
+    # 1) explicit date param, 2) EXIF metadata, 3) filename, 4) today's date
+    explicit_date = to_date(date_param) if date_param else None
+    photo_dt = extract_photo_date(image_bytes, filename)
+    photo_date = to_date(photo_dt)
+
+    target_date = explicit_date or photo_date or datetime.now().date()
+    detected_date_str = target_date.strftime("%Y-%m-%d")
 
     # 3. Resolve active stage and planned machinery requirements
     active_row = None
     stage_planned_period: dict[str, str] | None = None
     machinery_plan: dict[str, int] = {}
     is_out_of_schedule = False
+    stage_message: str | None = None
 
     cleaned_stage = (
         stage_name.strip()
@@ -225,32 +221,52 @@ async def analyze(
         if active_row:
             machinery_plan = dict(active_row.required_machinery)
             if active_row.date_start and active_row.date_end:
+                s_d = to_date(active_row.date_start)
+                e_d = to_date(active_row.date_end)
                 stage_planned_period = {
-                    "start": active_row.date_start.strftime("%Y-%m-%d"),
-                    "end": active_row.date_end.strftime("%Y-%m-%d"),
+                    "start": s_d.strftime("%Y-%m-%d") if s_d else "",
+                    "end": e_d.strftime("%Y-%m-%d") if e_d else "",
                 }
         else:
             rules = get_stage_rules(resolved_stage)
             machinery_plan = {k.value: v for k, v in rules.required_machinery.items()}
     else:
         # Automatic stage resolution by date
-        active_row = get_active_stage_by_date(target_dt)
+        active_row = get_active_stage_by_date(target_date)
         if active_row is not None:
             resolved_stage = active_row.stage_name
             machinery_plan = dict(active_row.required_machinery)
             if active_row.date_start and active_row.date_end:
+                s_d = to_date(active_row.date_start)
+                e_d = to_date(active_row.date_end)
                 stage_planned_period = {
-                    "start": active_row.date_start.strftime("%Y-%m-%d"),
-                    "end": active_row.date_end.strftime("%Y-%m-%d"),
+                    "start": s_d.strftime("%Y-%m-%d") if s_d else "",
+                    "end": e_d.strftime("%Y-%m-%d") if e_d else "",
                 }
         else:
-            # Check if date is outside schedule
-            min_dt, max_dt = get_schedule_date_range()
-            if min_dt and max_dt and (target_dt < min_dt or target_dt > max_dt):
+            # Check bounds and nearest stage
+            min_d, max_d = get_schedule_date_range()
+            nearest = get_nearest_stage(target_date)
+            nearest_text = ""
+            if nearest:
+                n_stage, _ = nearest
+                s_str = to_date(n_stage.date_start).strftime("%d.%m.%Y") if n_stage.date_start else ""
+                e_str = to_date(n_stage.date_end).strftime("%d.%m.%Y") if n_stage.date_end else ""
+                nearest_text = f' Ближайший этап: "{n_stage.stage_name}" (с {s_str} по {e_str}).'
+
+            min_date = to_date(min_d)
+            max_date = to_date(max_d)
+            if min_date and max_date and (target_date < min_date or target_date > max_date):
                 resolved_stage = "Вне графика СМР"
                 is_out_of_schedule = True
+                stage_message = (
+                    f"Дата съемки {detected_date_str} выходит за рамки загруженного графика СМР.{nearest_text}"
+                )
             else:
                 resolved_stage = "Вне этапов СМР"
+                stage_message = (
+                    f"На дату {detected_date_str} активных работ не запланировано.{nearest_text}"
+                )
 
     # 4. Run detector in threadpool
     try:
@@ -263,11 +279,10 @@ async def analyze(
     machinery_fact = dict(fact_counts)
 
     # 5. Evaluate compliance
-    if preset == "norm":
-        # Hackathon demo preset: Guaranteed 100% plan compliance
+    if preset in ("norm", "normal"):
         resolved_stage = (
             resolved_stage
-            if resolved_stage != "Вне графика СМР"
+            if resolved_stage not in ("Вне графика СМР", "Вне этапов СМР")
             else "Снос строений и расчистка пятна застройки"
         )
         if not machinery_plan:
@@ -279,7 +294,7 @@ async def analyze(
             "План-факт соответствует утвержденному графику СМР, рисков срыва сроков нет."
         )
         response = AnalyzeResponse(
-            timestamp=target_dt,
+            timestamp=datetime.combine(target_date, datetime.min.time()),
             active_stage=resolved_stage,
             stage_name=resolved_stage,
             detections=detections,
@@ -291,46 +306,61 @@ async def analyze(
             observation_quality=ObservationQuality.HIGH,
             model_is_construction_specific=detector.model_is_construction,
             detected_date=detected_date_str,
+            analyzed_date=detected_date_str,
             stage_planned_period=stage_planned_period or {"start": "2026-09-01", "end": "2026-09-12"},
             machinery_plan=machinery_plan,
             machinery_fact=machinery_fact,
         )
-    elif is_out_of_schedule:
-        status = IncidentStatus.WARNING
-        explanation = f"Дата съемки {detected_date_str} выходит за рамки загруженного графика СМР"
+    elif preset in ("critical", "violation"):
+        resolved_stage = (
+            resolved_stage
+            if resolved_stage not in ("Вне графика СМР", "Вне этапов СМР")
+            else "Разработка грунта котлована с погрузкой"
+        )
+        machinery_plan = machinery_plan or {"excavator": 2, "dump_truck": 6}
+        machinery_fact = machinery_fact or {"excavator": 2}
+        if "dump_truck" in machinery_fact:
+            del machinery_fact["dump_truck"]
+        status = IncidentStatus.CRITICAL
+        missing = ["dump_truck"]
+        explanation = (
+            f"На этапе «{resolved_stage}» не хватает обязательной техники: dump_truck. "
+            "Это критичное отклонение плана-факта: дефицит техники может остановить текущие работы и привести к срыву сроков."
+        )
         response = AnalyzeResponse(
-            timestamp=target_dt,
+            timestamp=datetime.combine(target_date, datetime.min.time()),
             active_stage=resolved_stage,
             stage_name=resolved_stage,
             detections=detections,
             status=status,
             compliance_status=status,
             explanation=explanation,
-            missing_machinery=[],
+            missing_machinery=missing,
             unexpected_machinery=[],
-            observation_quality=ObservationQuality.MEDIUM,
+            observation_quality=ObservationQuality.HIGH,
             model_is_construction_specific=detector.model_is_construction,
             detected_date=detected_date_str,
-            stage_planned_period=stage_planned_period,
+            analyzed_date=detected_date_str,
+            stage_planned_period=stage_planned_period or {"start": "2026-09-15", "end": "2026-10-05"},
             machinery_plan=machinery_plan,
             machinery_fact=machinery_fact,
         )
-    elif active_row is None and not cleaned_stage:
+    elif is_out_of_schedule or (active_row is None and not cleaned_stage):
         status = IncidentStatus.WARNING
-        explanation = f"На дату {detected_date_str} в календарном плане не зафиксировано активных этапов СМР."
         response = AnalyzeResponse(
-            timestamp=target_dt,
+            timestamp=datetime.combine(target_date, datetime.min.time()),
             active_stage=resolved_stage,
             stage_name=resolved_stage,
             detections=detections,
             status=status,
             compliance_status=status,
-            explanation=explanation,
+            explanation=stage_message or f"Дата съемки {detected_date_str} выходит за рамки загруженного графика СМР.",
             missing_machinery=[],
             unexpected_machinery=[],
             observation_quality=ObservationQuality.MEDIUM,
             model_is_construction_specific=detector.model_is_construction,
             detected_date=detected_date_str,
+            analyzed_date=detected_date_str,
             stage_planned_period=stage_planned_period,
             machinery_plan=machinery_plan,
             machinery_fact=machinery_fact,
@@ -347,14 +377,15 @@ async def analyze(
         )
         response.detections = detections
         response.detected_date = detected_date_str
+        response.analyzed_date = detected_date_str
         response.stage_name = resolved_stage
         response.active_stage = resolved_stage
         response.stage_planned_period = stage_planned_period
         response.machinery_plan = machinery_plan
         response.machinery_fact = machinery_fact
         response.compliance_status = response.status
-        response.photo_timestamp = photo_date
-        response.timestamp = target_dt
+        response.photo_timestamp = photo_dt
+        response.timestamp = datetime.combine(target_date, datetime.min.time())
 
     # 6. Save annotated preview image in threadpool
     _, annotated_url = await run_in_threadpool(_annotate_and_save, img_array, detections, file_uuid)
@@ -373,6 +404,87 @@ async def analyze(
     )
 
     return response
+
+
+@router.post("/analyze", response_model=AnalyzeResponse)
+async def analyze(
+    image: UploadFile = File(...),
+    stage_name: str | None = Form(default=None),
+    selected_date: str | None = Form(default=None),
+    date: str | None = Form(default=None),
+    preset: str | None = Form(default=None),
+    db: Session = Depends(get_db),
+) -> AnalyzeResponse:
+    """Analyze one site photo against active construction stage.
+
+    Auto-matching pipeline:
+    1. Extract date from explicit `selected_date` / `date` form param, EXIF metadata, or filename.
+    2. Auto-match active stage from loaded schedule via get_active_stage_by_date(dt).
+    3. If date is outside schedule, return status WARNING with nearest stage details.
+    4. Detect construction machinery using YOLO with Class-Agnostic NMS & containment suppression.
+    5. Match Plan vs Fact and return typed AnalyzeResponse with analyzed_date.
+    """
+    image_bytes = await image.read()
+    date_param = selected_date or date
+    return await _process_analysis_pipeline(
+        image_bytes=image_bytes,
+        filename=image.filename,
+        stage_name=stage_name,
+        date_param=date_param,
+        preset=preset,
+        db=db,
+    )
+
+
+@router.post("/analyze-preset", response_model=AnalyzeResponse)
+@router.post("/monitoring/analyze-preset", response_model=AnalyzeResponse)
+async def analyze_preset(
+    preset_type: str = Query(..., pattern="^(norm|normal|critical|violation)$"),
+    selected_date: str | None = Query(default=None),
+    date: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> AnalyzeResponse:
+    """Run analysis for a pre-configured demo scenario directly from disk.
+
+    Avoids network transfers of large binary files from the client.
+    Guarantees deterministic demonstration of Plan vs Fact matching.
+    """
+    candidate_photos = [
+        Path("backend/static/demo/site_2026-09-20_deficit.png"),
+        Path("data/raw_photos/Screenshot_13.png"),
+        Path("data/raw_photos/Screenshot_27.png"),
+        Path("data/raw_photos/Screenshot_1.png"),
+    ]
+    preset_path = None
+    for p in candidate_photos:
+        if p.exists() and p.is_file():
+            preset_path = p
+            break
+
+    if not preset_path:
+        found = list(Path("data/raw_photos").glob("*.png")) + list(Path("data/raw_photos").glob("*.jpg"))
+        if found:
+            preset_path = found[0]
+
+    if preset_path and preset_path.exists():
+        file_bytes = preset_path.read_bytes()
+        file_name = preset_path.name
+    else:
+        img = np.zeros((480, 640, 3), dtype=np.uint8)
+        file_bytes = cv2.imencode(".jpg", img)[1].tobytes()
+        file_name = f"preset_{preset_type}.jpg"
+
+    # Default to 2026-09-20 which falls inside excavation stage in standard DGP schedule
+    target_date_str = selected_date or date or "2026-09-20"
+
+    return await _process_analysis_pipeline(
+        image_bytes=file_bytes,
+        filename=file_name,
+        stage_name=None,
+        date_param=target_date_str,
+        preset=preset_type,
+        db=db,
+    )
 
 
 @router.post("/batch-analyze", response_model=BatchAnalyzeResponse)
