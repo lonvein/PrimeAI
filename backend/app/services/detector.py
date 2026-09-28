@@ -18,6 +18,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+from PIL import Image, ImageDraw, ImageFont
 
 from ..core.config import get_settings
 from ..schemas.contracts import DetectionItem, MachineryType
@@ -166,6 +167,128 @@ def suppress_contained_boxes(
                     suppressed.add(j)
 
     return [d for idx, d in enumerate(detections) if idx not in suppressed]
+
+
+# ---------------------------------------------------------------------------
+# Strict Russian localization mapping for DGP Moscow normative ontology
+# ---------------------------------------------------------------------------
+LABEL_MAPPING_RU: dict[str, str] = {
+    "dump_truck": "Самосвал",
+    "excavator": "Экскаватор",
+    "roller": "Каток",
+    "manipulator": "Кран-манипулятор",
+    "crane_manipulator": "Кран-манипулятор",
+    "bulldozer": "Бульдозер",
+    "mobile_crane": "Автокран",
+    "concrete_mixer": "Бетоносмеситель",
+    "truck": "Грузовик",
+}
+
+
+def _get_font(size: int = 16) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """Attempt to load a TrueType font supporting Cyrillic with safe fallbacks."""
+    candidate_fonts = [
+        "arial.ttf",
+        "segoeui.ttf",
+        "calibri.ttf",
+        "DejaVuSans.ttf",
+        "DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]
+    for font_name in candidate_fonts:
+        try:
+            return ImageFont.truetype(font_name, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def annotate_image(image: np.ndarray, detections: list) -> np.ndarray:
+    """Draw bounding boxes and Cyrillic class labels on image using Pillow.
+
+    Args:
+        image: BGR numpy ndarray.
+        detections: List of DetectionItem objects or dicts with bbox, class_name, confidence.
+
+    Returns:
+        Annotated BGR numpy ndarray.
+    """
+    if image is None or image.size == 0:
+        return image
+
+    annotated = image.copy()
+    h, w = annotated.shape[:2]
+
+    # Convert BGR to RGB PIL image for crisp Cyrillic text rendering
+    pil_image = Image.fromarray(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_image)
+
+    font_size = max(14, int(min(w, h) * 0.024))
+    font = _get_font(size=font_size)
+
+    box_color = (0, 190, 70)  # RGB Emerald green
+    text_color = (255, 255, 255)
+
+    for item in detections:
+        # Handle both DetectionItem and dict
+        if isinstance(item, dict):
+            raw_bbox = item.get("bbox", [])
+            class_obj = item.get("class_name", "")
+            confidence = float(item.get("confidence", 0.0))
+        else:
+            raw_bbox = getattr(item, "bbox", [])
+            class_obj = getattr(item, "class_name", "")
+            confidence = float(getattr(item, "confidence", 0.0))
+
+        if len(raw_bbox) != 4:
+            continue
+
+        x1, y1, x2, y2 = [int(round(float(v))) for v in raw_bbox]
+        x1 = max(0, min(w - 1, x1))
+        y1 = max(0, min(h - 1, y1))
+        x2 = max(0, min(w - 1, x2))
+        y2 = max(0, min(h - 1, y2))
+
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        # Draw green bounding box
+        draw.rectangle([x1, y1, x2, y2], outline=box_color, width=3)
+
+        # Resolve Russian class name
+        class_str = class_obj.value if hasattr(class_obj, "value") else str(class_obj)
+        ru_name = LABEL_MAPPING_RU.get(class_str, class_str)
+        label = f"{ru_name} {confidence:.0%}"
+
+        # Calculate text badge dimensions
+        try:
+            bbox_text = draw.textbbox((0, 0), label, font=font)
+            text_w = bbox_text[2] - bbox_text[0]
+            text_h = bbox_text[3] - bbox_text[1]
+        except Exception:
+            text_w = len(label) * 9
+            text_h = font_size
+
+        pad_x = 6
+        pad_y = 4
+        badge_h = text_h + pad_y * 2
+
+        if y1 - badge_h >= 0:
+            badge_y1 = y1 - badge_h
+            badge_y2 = y1
+        else:
+            badge_y1 = y1
+            badge_y2 = min(h, y1 + badge_h)
+
+        badge_x2 = min(w, x1 + text_w + pad_x * 2)
+
+        # Draw filled green badge and white text
+        draw.rectangle([x1, badge_y1, badge_x2, badge_y2], fill=box_color)
+        draw.text((x1 + pad_x, badge_y1 + pad_y), label, fill=text_color, font=font)
+
+    return cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
 
 
 class MachineryDetector:

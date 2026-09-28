@@ -32,7 +32,7 @@ from ...schemas.contracts import (
     ObservationQuality,
     ScheduleRow,
 )
-from ...services.detector import MachineryDetector
+from ...services.detector import MachineryDetector, annotate_image
 from ...services.exif_utils import _extract_exif_date, _extract_filename_date, extract_photo_date
 from ...services.matcher import evaluate_batch_compliance, evaluate_compliance
 from ...services.ontology import get_stage_rules
@@ -114,21 +114,8 @@ def _save_raw_image(image_bytes: bytes, filename: str | None, file_uuid: str) ->
 
 
 def _annotate_and_save(image: np.ndarray, detections: list, file_uuid: str) -> tuple[Path, str]:
-    """Draw bounding boxes on image, save to static/annotated/ and static/debug/."""
-    annotated = image.copy()
-    for detection in detections:
-        left, top, right, bottom = (int(v) for v in detection.bbox)
-        cv2.rectangle(annotated, (left, top), (right, bottom), (0, 190, 80), 2)
-        label = f"{detection.class_name.value} {detection.confidence:.2f}"
-        cv2.putText(
-            annotated,
-            label,
-            (left, max(20, top - 8)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (0, 190, 80),
-            2,
-        )
+    """Draw bounding boxes and Cyrillic labels on image, save to static/annotated/ and static/debug/."""
+    annotated = annotate_image(image, detections)
     filename = f"{file_uuid}.jpg"
     annotated_path = settings.annotated_dir / filename
     cv2.imwrite(str(annotated_path), annotated)
