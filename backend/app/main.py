@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +14,7 @@ from .core.config import get_settings
 from .core.logging import configure_logging
 from .db.models import Base  # noqa: F401 — registers all ORM models with metadata
 from .db.session import engine
+from .services.schedule_parser import init_default_schedule
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -41,6 +43,16 @@ with engine.begin() as conn:
 
 logger.info("Database tables ready: %s", settings.database_url)
 
+# Initialize and persist default schedule template
+init_default_schedule()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan context: initialize schedule and resources."""
+    init_default_schedule()
+    yield
+
 # ---------------------------------------------------------------------------
 # Ensure static/debug directory exists.
 # ---------------------------------------------------------------------------
@@ -54,6 +66,7 @@ app = FastAPI(
         "Plan vs Fact monitoring for construction sites: "
         "detects machinery in photos and compares against normative schedule requirements."
     ),
+    lifespan=lifespan,
 )
 
 configure_logging()

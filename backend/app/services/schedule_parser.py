@@ -26,13 +26,55 @@ from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
 import threading
-from typing import Any
+from typing import Any, NamedTuple, Union
 
 import pandas as pd
 
 from ..schemas.contracts import MachineryType, ScheduleRow, StageRequirement
 
 logger = logging.getLogger(__name__)
+
+
+class StageFallback(NamedTuple):
+    """Structured fallback returned when date is outside active stages."""
+
+    stage: ScheduleRow
+    days: int
+
+
+def normalize_to_date(val: Union[str, date, datetime, None]) -> date:
+    """Strict date normalizer converting string/datetime/Timestamp to datetime.date."""
+    if val is None:
+        return date.today()
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    if isinstance(val, pd.Timestamp):
+        return val.to_pydatetime().date()
+    if isinstance(val, str):
+        val = val.strip()
+        clean_val = val.split("T")[0].split(" ")[0].strip()
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y"):
+            try:
+                return datetime.strptime(clean_val, fmt).date()
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(val).date()
+        except ValueError:
+            pass
+    raise ValueError(f"Невозможно распознать дату: {val}")
+
+
+def to_date(value: Any) -> date | None:
+    """Convert any date representation to datetime.date or None if invalid."""
+    if value is None:
+        return None
+    try:
+        return normalize_to_date(value)
+    except (ValueError, TypeError):
+        return None
 
 # ---------------------------------------------------------------------------
 # Russian term → MachineryType mapping.
@@ -96,34 +138,14 @@ def _parse_date(value: Any) -> datetime | None:
         return value
     if isinstance(value, date):
         return datetime(value.year, value.month, value.day)
-    if isinstance(value, str):
-        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y"):
-            try:
-                return datetime.strptime(value, fmt)
-            except ValueError:
-                continue
     if isinstance(value, pd.Timestamp):
         return value.to_pydatetime()
-    return None
-
-
-def to_date(value: Any) -> date | None:
-    """Normalize any date/datetime/string representation to datetime.date."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    if isinstance(value, pd.Timestamp):
-        return value.to_pydatetime().date()
     if isinstance(value, str):
-        clean_val = value.strip().split("T")[0].split(" ")[0]
-        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%Y/%m/%d", "%d/%m/%Y", "%m/%d/%Y"):
-            try:
-                return datetime.strptime(clean_val, fmt).date()
-            except ValueError:
-                continue
+        try:
+            d = normalize_to_date(value)
+            return datetime(d.year, d.month, d.day)
+        except Exception:
+            return None
     return None
 
 
@@ -199,22 +221,28 @@ def parse_schedule_structured(file_bytes: bytes) -> list[ScheduleRow]:
 
 def get_active_stages(
     schedule: list[ScheduleRow],
-    query_date: datetime | date | str,
+    query_date: Any,
 ) -> list[ScheduleRow]:
     """Return all stages whose date interval contains query_date.
 
     Normalized to datetime.date to avoid time-of-day or type mismatch errors.
     """
-    target = to_date(query_date)
-    if target is None:
+    try:
+        target = normalize_to_date(query_date)
+    except (ValueError, TypeError):
         return []
 
     active = []
     for row in schedule:
-        s_start = to_date(row.date_start)
-        s_end = to_date(row.date_end)
-        if s_start and s_end and s_start <= target <= s_end:
-            active.append(row)
+        if not row.date_start or not row.date_end:
+            continue
+        try:
+            s_start = normalize_to_date(row.date_start)
+            s_end = normalize_to_date(row.date_end)
+            if s_start <= target <= s_end:
+                active.append(row)
+        except Exception:
+            continue
     return active
 
 
@@ -229,7 +257,7 @@ def schedule_row_to_stage_requirement(row: ScheduleRow) -> StageRequirement:
 
 
 # ---------------------------------------------------------------------------
-# Global Schedule Cache and Date-based Stage Resolution
+# Global Schedule Cache, DB Persistence and Date-based Stage Resolution
 # ---------------------------------------------------------------------------
 _schedule_lock = threading.Lock()
 _loaded_schedule: list[ScheduleRow] = []
@@ -238,16 +266,107 @@ _loaded_schedule: list[ScheduleRow] = []
 def _find_default_schedule_file() -> Path | None:
     """Find default Moscow DGP schedule Excel template."""
     base_dir = Path(__file__).resolve().parents[3]
-    for rel_path in [
+    candidate_paths = [
         Path("MSC_lct/График_шаблон.xlsx"),
+        base_dir / "MSC_lct" / "График_шаблон.xlsx",
+        Path("MSC_lct/График_шаблон.xlsx"),
+        base_dir / "data" / "Сводный перечень строительных работ_ЛТЦ.xlsx",
         Path("data/Сводный перечень строительных работ_ЛТЦ.xlsx"),
-    ]:
-        p1 = base_dir / rel_path
-        if p1.is_file():
-            return p1
-        if rel_path.is_file():
-            return rel_path
+    ]
+    for p in candidate_paths:
+        if p.is_file():
+            return p
     return None
+
+
+def save_stages_to_db(rows: list[ScheduleRow]) -> None:
+    """Save or update parsed stages in SQLite build_eye.db."""
+    try:
+        from ..db.models import Stage  # noqa: PLC0415
+        from ..db.session import SessionLocal  # noqa: PLC0415
+
+        with SessionLocal() as db:
+            for r in rows:
+                existing = db.query(Stage).filter(Stage.name == r.stage_name).first()
+                if existing:
+                    existing.date_start = r.date_start
+                    existing.date_end = r.date_end
+                    existing.machinery_plan = r.machinery_plan or ""
+                else:
+                    st = Stage(
+                        name=r.stage_name,
+                        date_start=r.date_start,
+                        date_end=r.date_end,
+                        machinery_plan=r.machinery_plan or "",
+                    )
+                    db.add(st)
+            db.commit()
+            logger.debug("Persisted %d stages to database", len(rows))
+    except Exception as exc:
+        logger.warning("Failed to save stages to DB: %s", exc)
+
+
+def load_stages_from_db() -> list[ScheduleRow]:
+    """Fallback: load stages from database if memory cache is empty."""
+    try:
+        from ..db.models import Stage  # noqa: PLC0415
+        from ..db.session import SessionLocal  # noqa: PLC0415
+
+        with SessionLocal() as db:
+            db_stages = db.query(Stage).all()
+            if not db_stages:
+                return []
+            rows = []
+            for idx, s in enumerate(db_stages):
+                req = parse_machinery_text(s.machinery_plan or "")
+                rows.append(
+                    ScheduleRow(
+                        index=idx,
+                        stage_name=s.name,
+                        date_start=s.date_start,
+                        date_end=s.date_end,
+                        machinery_plan=s.machinery_plan,
+                        required_machinery={k.value: v for k, v in req.items()},
+                    )
+                )
+            return rows
+    except Exception as exc:
+        logger.warning("Could not load stages from DB fallback: %s", exc)
+        return []
+
+
+def init_default_schedule() -> list[ScheduleRow]:
+    """Find, parse, persist, and cache default schedule from MSC_lct/График_шаблон.xlsx."""
+    global _loaded_schedule
+    schedule_path = _find_default_schedule_file()
+    if schedule_path and schedule_path.is_file():
+        try:
+            rows = parse_schedule_structured(schedule_path.read_bytes())
+            set_loaded_schedule(rows)
+            save_stages_to_db(rows)
+            starts = [normalize_to_date(r.date_start) for r in rows if r.date_start]
+            ends = [normalize_to_date(r.date_end) for r in rows if r.date_end]
+            min_date = min(starts).strftime("%Y-%m-%d") if starts else "N/A"
+            max_date = max(ends).strftime("%Y-%m-%d") if ends else "N/A"
+            logger.info("График СМР инициализирован: %d этапов с %s по %s", len(rows), min_date, max_date)
+            return list(rows)
+        except Exception as exc:
+            logger.error("Failed to parse default schedule %s: %s", schedule_path, exc)
+    else:
+        logger.warning("Эталонный файл графика СМР не найден по пути: MSC_lct/График_шаблон.xlsx")
+
+    # DB fallback
+    db_rows = load_stages_from_db()
+    if db_rows:
+        set_loaded_schedule(db_rows)
+        starts = [normalize_to_date(r.date_start) for r in db_rows if r.date_start]
+        ends = [normalize_to_date(r.date_end) for r in db_rows if r.date_end]
+        min_date = min(starts).strftime("%Y-%m-%d") if starts else "N/A"
+        max_date = max(ends).strftime("%Y-%m-%d") if ends else "N/A"
+        logger.info("График СМР инициализирован: %d этапов с %s по %s", len(db_rows), min_date, max_date)
+        return list(db_rows)
+
+    return []
 
 
 def ensure_default_schedule_loaded() -> list[ScheduleRow]:
@@ -256,30 +375,11 @@ def ensure_default_schedule_loaded() -> list[ScheduleRow]:
     with _schedule_lock:
         if _loaded_schedule:
             return list(_loaded_schedule)
-
-        schedule_path = _find_default_schedule_file()
-        if schedule_path and schedule_path.is_file():
-            try:
-                rows = parse_schedule_structured(schedule_path.read_bytes())
-                _loaded_schedule = rows
-                logger.info(
-                    "Auto-loaded default schedule from %s (%d stages)",
-                    schedule_path,
-                    len(rows),
-                )
-                try:
-                    from .ontology import load_schedule_rules  # noqa: PLC0415
-                    load_schedule_rules(rows)
-                except Exception as exc:
-                    logger.warning("Could not sync default schedule rules to ontology: %s", exc)
-                return list(_loaded_schedule)
-            except Exception as exc:
-                logger.error("Failed to parse default schedule %s: %s", schedule_path, exc)
-    return []
+    return init_default_schedule()
 
 
 def get_loaded_schedule() -> list[ScheduleRow]:
-    """Return currently loaded schedule rows, initializing from template if needed."""
+    """Return currently loaded schedule rows, initializing from template or DB if needed."""
     with _schedule_lock:
         if _loaded_schedule:
             return list(_loaded_schedule)
@@ -308,42 +408,61 @@ def get_schedule_date_range() -> tuple[datetime | None, datetime | None]:
     return min(starts), max(ends)
 
 
-def get_active_stage_by_date(target_date: datetime | date | str) -> ScheduleRow | None:
+def get_active_stage_by_date(
+    target_date: Union[str, date, datetime, None],
+    fallback: bool = True,
+) -> ScheduleRow | StageFallback | None:
     """Find the active stage from the loaded schedule for a given date.
 
-    If multiple stages overlap on target_date, returns the one that started
-    most recently (highest date_start). All comparisons are done as datetime.date.
+    All date comparisons are done strictly as datetime.date via normalize_to_date.
+    If loaded_stages is empty, falls back to reading from SQLAlchemy DB.
+    If date does not fall into any stage and fallback=True, returns StageFallback(nearest_stage, days_diff).
+    If fallback=False and no stage matches, returns None.
     """
-    target = to_date(target_date)
-    if target is None:
-        return None
+    target = normalize_to_date(target_date)
 
     schedule = get_loaded_schedule()
-    active = get_active_stages(schedule, target)
-    if not active:
+    if not schedule:
+        schedule = load_stages_from_db()
+        if schedule:
+            set_loaded_schedule(schedule)
+
+    if not schedule:
         return None
 
-    return max(active, key=lambda r: to_date(r.date_start) or date.min)
+    active = get_active_stages(schedule, target)
+    if active:
+        return max(active, key=lambda r: normalize_to_date(r.date_start) if r.date_start else date.min)
+
+    if fallback:
+        nearest = get_nearest_stage(target)
+        if nearest:
+            return StageFallback(stage=nearest[0], days=nearest[1])
+
+    return None
 
 
-def get_nearest_stage(target_date: datetime | date | str) -> tuple[ScheduleRow, int] | None:
+def get_nearest_stage(target_date: Union[str, date, datetime, None]) -> tuple[ScheduleRow, int] | None:
     """Find the chronologically closest stage to target_date when none is active.
 
     Returns tuple (nearest_stage, days_distance) or None if schedule is empty.
     Positive distance = target is before stage; negative = target is after stage.
     """
-    target = to_date(target_date)
-    if target is None:
-        return None
+    target = normalize_to_date(target_date)
 
     schedule = get_loaded_schedule()
-    valid_stages = [r for r in schedule if to_date(r.date_start) and to_date(r.date_end)]
+    if not schedule:
+        schedule = load_stages_from_db()
+        if schedule:
+            set_loaded_schedule(schedule)
+
+    valid_stages = [r for r in schedule if r.date_start and r.date_end]
     if not valid_stages:
         return None
 
     def distance_to_stage(row: ScheduleRow) -> int:
-        s_start = to_date(row.date_start)
-        s_end = to_date(row.date_end)
+        s_start = normalize_to_date(row.date_start)
+        s_end = normalize_to_date(row.date_end)
         if s_start <= target <= s_end:
             return 0
         if target < s_start:

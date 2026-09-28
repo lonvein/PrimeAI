@@ -65,11 +65,38 @@ def test_analyze_date_outside_schedule_returns_warning():
 
     assert data["compliance_status"] == "WARNING"
     assert data["status"] == "WARNING"
-    assert data["stage_name"] == "Вне графика СМР"
+    assert data["stage_name"] in ("Вне графика СМР", "Вне этапов СМР")
     assert "2028-06-15" in data["explanation"]
-    assert "выходит за рамки загруженного графика СМР" in data["explanation"]
+    assert "активных работ по графику не запланировано" in data["explanation"]
     assert "Ближайший этап:" in data["explanation"]
     assert data["analyzed_date"] == "2028-06-15"
+
+
+def test_analyze_preset_normal_without_date_returns_real_stage():
+    """Calling /analyze-preset?preset_type=normal must return real stage name and HTTP 200."""
+    response = client.post("/api/v1/analyze-preset?preset_type=normal")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["stage_name"] is not None
+    assert data["stage_name"] != "Вне этапов СМР"
+    assert "снос" in data["stage_name"].lower() or "расчист" in data["stage_name"].lower()
+    assert data["compliance_status"] == "OK"
+    assert data["analyzed_date"] == "2026-09-05"
+
+
+def test_analyze_russian_date_format_normalized():
+    """Passing selected_date='05.09.2026' must return analyzed_date='2026-09-05'."""
+    file_bytes = _make_dummy_image_bytes()
+    response = client.post(
+        "/api/v1/analyze",
+        data={"selected_date": "05.09.2026"},
+        files={"image": ("photo.png", file_bytes, "image/png")},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["analyzed_date"] == "2026-09-05"
+    assert "снос" in data["stage_name"].lower() or "расчист" in data["stage_name"].lower()
+    assert data["stage_planned_period"] == {"start": "2026-09-01", "end": "2026-09-12"}
 
 
 def test_analyze_preset_endpoint_norm():

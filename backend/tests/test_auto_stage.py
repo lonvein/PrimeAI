@@ -53,9 +53,18 @@ def test_active_stage_by_date_late_september():
 
 
 def test_active_stage_outside_schedule():
-    """Date outside schedule bounds must return None."""
-    stage_past = get_active_stage_by_date("2025-01-01")
-    assert stage_past is None
+    """Date outside schedule bounds must return structured fallback (nearest stage, days)."""
+    fallback_past = get_active_stage_by_date("2025-01-01")
+    assert fallback_past is not None
+    assert isinstance(fallback_past, tuple)
+    assert fallback_past.days > 0
+    assert fallback_past.stage is not None
 
-    stage_future = get_active_stage_by_date("2028-12-31")
-    assert stage_future is None
+    stage_past_no_fb = get_active_stage_by_date("2025-01-01", fallback=False)
+    assert stage_past_no_fb is None
+
+    fallback_future = get_active_stage_by_date("2028-12-31")
+    assert fallback_future is not None
+    assert isinstance(fallback_future, tuple)
+    assert fallback_future.days > 0
+    assert fallback_future.stage is not None

@@ -10,7 +10,7 @@ Changes in this version:
 """
 
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import json
 import logging
 from pathlib import Path
@@ -30,24 +30,67 @@ from ...schemas.contracts import (
     BatchAnalyzeResponse,
     IncidentStatus,
     ObservationQuality,
+    ScheduleRow,
 )
 from ...services.detector import MachineryDetector
-from ...services.exif_utils import extract_photo_date
+from ...services.exif_utils import _extract_exif_date, _extract_filename_date, extract_photo_date
 from ...services.matcher import evaluate_batch_compliance, evaluate_compliance
 from ...services.ontology import get_stage_rules
 from ...services.report_generator import generate_incident_act_pdf
 from ...services.schedule_parser import (
-    _parse_date,
+    StageFallback,
     get_active_stage_by_date,
     get_loaded_schedule,
     get_nearest_stage,
     get_schedule_date_range,
+    normalize_to_date,
     to_date,
 )
 from ...core.config import get_settings
 
 router = APIRouter(tags=["monitoring"])
 settings = get_settings()
+
+
+def resolve_analysis_date(
+    selected_date_str: str | None,
+    image_bytes: bytes,
+    filename: str | None,
+) -> tuple[date, str, datetime | None]:
+    """Resolve target date following strict priority:
+    1. selected_date (explicitly passed by user in UI)
+    2. EXIF metadata (DateTimeOriginal)
+    3. Filename regex pattern (e.g., Screenshot_2026-09-20...)
+    4. Current system date (date.today())
+
+    Returns (target_date, target_date_iso_str, photo_exif_dt).
+    """
+    photo_exif_dt = None
+    if image_bytes:
+        photo_exif_dt = _extract_exif_date(image_bytes)
+
+    filename_dt = None
+    if filename:
+        filename_dt = _extract_filename_date(filename)
+
+    # 1. User selected date
+    if selected_date_str and str(selected_date_str).strip() not in ("null", "undefined", ""):
+        target_d = normalize_to_date(selected_date_str)
+        return target_d, target_d.strftime("%Y-%m-%d"), photo_exif_dt
+
+    # 2. EXIF metadata
+    if photo_exif_dt:
+        target_d = normalize_to_date(photo_exif_dt)
+        return target_d, target_d.strftime("%Y-%m-%d"), photo_exif_dt
+
+    # 3. Filename regex pattern
+    if filename_dt:
+        target_d = normalize_to_date(filename_dt)
+        return target_d, target_d.strftime("%Y-%m-%d"), photo_exif_dt
+
+    # 4. Current system date
+    today_d = date.today()
+    return today_d, today_d.strftime("%Y-%m-%d"), photo_exif_dt
 
 DEBUG_DIR = settings.static_dir / "debug"
 DEBUG_DIR.mkdir(parents=True, exist_ok=True)
@@ -192,19 +235,20 @@ async def _process_analysis_pipeline(
         raise HTTPException(status_code=400, detail="Uploaded file is not a readable image")
 
     # 2. Extract or resolve target date with strict precedence:
-    # 1) explicit date param, 2) EXIF metadata, 3) filename, 4) today's date
-    explicit_date = to_date(date_param) if date_param else None
-    photo_dt = extract_photo_date(image_bytes, filename)
-    photo_date = to_date(photo_dt)
-
-    target_date = explicit_date or photo_date or datetime.now().date()
-    detected_date_str = target_date.strftime("%Y-%m-%d")
+    # 1) selected_date (explicitly passed by user in UI)
+    # 2) EXIF metadata (DateTimeOriginal)
+    # 3) Filename regex pattern (e.g., Screenshot_2026-09-20...)
+    # 4) Current system date (date.today())
+    target_date, detected_date_str, photo_dt = resolve_analysis_date(
+        selected_date_str=date_param,
+        image_bytes=image_bytes,
+        filename=filename,
+    )
 
     # 3. Resolve active stage and planned machinery requirements
     active_row = None
     stage_planned_period: dict[str, str] | None = None
     machinery_plan: dict[str, int] = {}
-    is_out_of_schedule = False
     stage_message: str | None = None
 
     cleaned_stage = (
@@ -221,52 +265,55 @@ async def _process_analysis_pipeline(
         if active_row:
             machinery_plan = dict(active_row.required_machinery)
             if active_row.date_start and active_row.date_end:
-                s_d = to_date(active_row.date_start)
-                e_d = to_date(active_row.date_end)
+                s_d = normalize_to_date(active_row.date_start)
+                e_d = normalize_to_date(active_row.date_end)
                 stage_planned_period = {
-                    "start": s_d.strftime("%Y-%m-%d") if s_d else "",
-                    "end": e_d.strftime("%Y-%m-%d") if e_d else "",
+                    "start": s_d.strftime("%Y-%m-%d"),
+                    "end": e_d.strftime("%Y-%m-%d"),
                 }
         else:
             rules = get_stage_rules(resolved_stage)
             machinery_plan = {k.value: v for k, v in rules.required_machinery.items()}
     else:
         # Automatic stage resolution by date
-        active_row = get_active_stage_by_date(target_date)
-        if active_row is not None:
+        stage_res = get_active_stage_by_date(target_date)
+        if isinstance(stage_res, ScheduleRow):
+            active_row = stage_res
             resolved_stage = active_row.stage_name
             machinery_plan = dict(active_row.required_machinery)
             if active_row.date_start and active_row.date_end:
-                s_d = to_date(active_row.date_start)
-                e_d = to_date(active_row.date_end)
+                s_d = normalize_to_date(active_row.date_start)
+                e_d = normalize_to_date(active_row.date_end)
                 stage_planned_period = {
-                    "start": s_d.strftime("%Y-%m-%d") if s_d else "",
-                    "end": e_d.strftime("%Y-%m-%d") if e_d else "",
+                    "start": s_d.strftime("%Y-%m-%d"),
+                    "end": e_d.strftime("%Y-%m-%d"),
                 }
         else:
-            # Check bounds and nearest stage
-            min_d, max_d = get_schedule_date_range()
-            nearest = get_nearest_stage(target_date)
-            nearest_text = ""
-            if nearest:
-                n_stage, _ = nearest
-                s_str = to_date(n_stage.date_start).strftime("%d.%m.%Y") if n_stage.date_start else ""
-                e_str = to_date(n_stage.date_end).strftime("%d.%m.%Y") if n_stage.date_end else ""
-                nearest_text = f' Ближайший этап: "{n_stage.stage_name}" (с {s_str} по {e_str}).'
+            # Stage not found on target_date: structured fallback
+            active_row = None
+            resolved_stage = "Вне этапов СМР"
+            n_stage = None
+            if isinstance(stage_res, StageFallback):
+                n_stage = stage_res.stage
+            elif isinstance(stage_res, tuple) and len(stage_res) >= 2:
+                n_stage = stage_res[0]
+            else:
+                nearest = get_nearest_stage(target_date)
+                if nearest:
+                    n_stage = nearest[0]
 
-            min_date = to_date(min_d)
-            max_date = to_date(max_d)
-            if min_date and max_date and (target_date < min_date or target_date > max_date):
-                resolved_stage = "Вне графика СМР"
-                is_out_of_schedule = True
+            if n_stage:
+                s_d = normalize_to_date(n_stage.date_start) if n_stage.date_start else None
+                e_d = normalize_to_date(n_stage.date_end) if n_stage.date_end else None
+                s_str = s_d.strftime("%Y-%m-%d") if s_d else ""
+                e_str = e_d.strftime("%Y-%m-%d") if e_d else ""
+                stage_planned_period = {"start": s_str, "end": e_str}
                 stage_message = (
-                    f"Дата съемки {detected_date_str} выходит за рамки загруженного графика СМР.{nearest_text}"
+                    f'На дату {detected_date_str} активных работ по графику не запланировано. '
+                    f'Ближайший этап: "{n_stage.stage_name}" ({s_str} — {e_str})'
                 )
             else:
-                resolved_stage = "Вне этапов СМР"
-                stage_message = (
-                    f"На дату {detected_date_str} активных работ не запланировано.{nearest_text}"
-                )
+                stage_message = f"На дату {detected_date_str} активных работ по графику не запланировано."
 
     # 4. Run detector in threadpool
     try:
@@ -345,7 +392,7 @@ async def _process_analysis_pipeline(
             machinery_plan=machinery_plan,
             machinery_fact=machinery_fact,
         )
-    elif is_out_of_schedule or (active_row is None and not cleaned_stage):
+    elif active_row is None and not cleaned_stage:
         status = IncidentStatus.WARNING
         response = AnalyzeResponse(
             timestamp=datetime.combine(target_date, datetime.min.time()),
@@ -474,8 +521,29 @@ async def analyze_preset(
         file_bytes = cv2.imencode(".jpg", img)[1].tobytes()
         file_name = f"preset_{preset_type}.jpg"
 
-    # Default to 2026-09-20 which falls inside excavation stage in standard DGP schedule
-    target_date_str = selected_date or date or "2026-09-20"
+    schedule = get_loaded_schedule()
+    # Programmatically determine a date guaranteed to be inside an active stage from График_шаблон.xlsx
+    if preset_type in ("norm", "normal"):
+        first_stage = schedule[0] if schedule else None
+        if first_stage and first_stage.date_start and first_stage.date_end:
+            s_d = normalize_to_date(first_stage.date_start)
+            e_d = normalize_to_date(first_stage.date_end)
+            default_date = (s_d + timedelta(days=min(4, max(0, (e_d - s_d).days // 2)))).strftime("%Y-%m-%d")
+        else:
+            default_date = "2026-09-05"
+    else:
+        excavation_stage = next(
+            (s for s in schedule if "котлован" in s.stage_name.lower() or "разработ" in s.stage_name.lower()),
+            schedule[min(2, len(schedule) - 1)] if schedule else None,
+        )
+        if excavation_stage and excavation_stage.date_start and excavation_stage.date_end:
+            s_d = normalize_to_date(excavation_stage.date_start)
+            e_d = normalize_to_date(excavation_stage.date_end)
+            default_date = (s_d + timedelta(days=min(5, max(0, (e_d - s_d).days // 2)))).strftime("%Y-%m-%d")
+        else:
+            default_date = "2026-09-20"
+
+    target_date_str = selected_date or date or default_date
 
     return await _process_analysis_pipeline(
         image_bytes=file_bytes,
