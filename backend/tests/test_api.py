@@ -43,7 +43,7 @@ def test_get_incident_pdf() -> None:
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/pdf"
     assert response.content.startswith(b"%PDF-")
-    assert f'filename="incident_{inc_id}.pdf"' in response.headers["content-disposition"]
+    assert f'filename="akt_dgp_{inc_id}.pdf"' in response.headers["content-disposition"]
 
     # Test alias endpoint
     response_alias = client.get(f"/api/v1/incidents/{inc_id}/pdf")

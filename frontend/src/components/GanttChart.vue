@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { computed } from 'vue'
 
 const props = defineProps({
   /** Array of ScheduleRow objects from the API. */
@@ -39,6 +39,7 @@ const timelineData = computed(() => {
       leftPct: (offsetDays / totalDays) * 100,
       widthPct: Math.max(2, (durationDays / totalDays) * 100),
       isActive: row.stage_name === props.activeStageName,
+      isCompleted: Boolean(row.is_completed),
     }
   })
 
@@ -55,16 +56,21 @@ const timelineData = computed(() => {
         v-for="(stage, i) in timelineData.stages"
         :key="i"
         class="gantt-row"
-        :class="{ active: stage.isActive }"
+        :class="{ active: stage.isActive, completed: stage.isCompleted }"
       >
         <div class="gantt-label">
-          <span class="stage-name">{{ stage.stage_name }}</span>
+          <div class="stage-title-wrap">
+            <span class="stage-name" :class="{ completed: stage.isCompleted }">
+              {{ stage.stage_name }}
+            </span>
+            <span v-if="stage.isCompleted" class="badge-completed">✓ Завершен</span>
+          </div>
           <span class="stage-dates">{{ formatDateRange(stage.date_start, stage.date_end) }}</span>
         </div>
         <div class="gantt-track">
           <div
             class="gantt-bar"
-            :class="{ active: stage.isActive }"
+            :class="{ active: stage.isActive, completed: stage.isCompleted }"
             :style="{ left: stage.leftPct + '%', width: stage.widthPct + '%' }"
           >
             <span class="bar-label" v-if="stage.widthPct > 15">
@@ -85,8 +91,15 @@ const timelineData = computed(() => {
         </tr>
       </thead>
       <tbody>
-        <tr v-for="(row, i) in rows" :key="i" :class="{ active: row.stage_name === activeStageName }">
-          <td>{{ row.stage_name }}</td>
+        <tr
+          v-for="(row, i) in rows"
+          :key="i"
+          :class="{ active: row.stage_name === activeStageName, completed: row.is_completed }"
+        >
+          <td>
+            <span :class="{ 'completed-name': row.is_completed }">{{ row.stage_name }}</span>
+            <span v-if="row.is_completed" class="badge-completed ml-2">✓ Завершен</span>
+          </td>
           <td>{{ row.machinery_plan || '—' }}</td>
           <td>{{ row.contractor || '—' }}</td>
         </tr>
@@ -120,6 +133,9 @@ const timelineData = computed(() => {
   align-items: center;
 }
 .gantt-row.active .gantt-label { font-weight: 700; }
+.gantt-row.completed {
+  opacity: 0.85;
+}
 
 .gantt-label {
   display: flex;
@@ -127,10 +143,34 @@ const timelineData = computed(() => {
   font-size: 0.85rem;
   line-height: 1.3;
 }
+.stage-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
 .stage-name {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 200px;
+}
+.stage-name.completed, .completed-name {
+  text-decoration: line-through;
+  color: #64748b;
+}
+.badge-completed {
+  background: #dcfce7;
+  color: #15803d;
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 0.15rem 0.45rem;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+}
+.ml-2 {
+  margin-left: 0.4rem;
 }
 .stage-dates {
   color: #888;
@@ -157,6 +197,9 @@ const timelineData = computed(() => {
 }
 .gantt-bar.active {
   background: #2b8a5a;
+}
+.gantt-bar.completed {
+  background: #94a3b8;
 }
 .bar-label {
   font-size: 0.7rem;
@@ -185,5 +228,8 @@ const timelineData = computed(() => {
 .machinery-table tr.active {
   background: #e8f5ed;
   font-weight: 600;
+}
+.machinery-table tr.completed {
+  background: #f8fafc;
 }
 </style>

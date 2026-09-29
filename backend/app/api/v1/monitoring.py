@@ -138,6 +138,7 @@ def _persist_analysis(
     """Save incident and detections to the database with links to raw and annotated photos."""
     try:
         incident = IncidentAlert(
+            stage_id=response.stage_id,
             stage_name=response.active_stage,
             status=response.status.value,
             explanation=response.explanation,
@@ -312,8 +313,42 @@ async def _process_analysis_pipeline(
     fact_counts = Counter(item.class_name.value for item in detections)
     machinery_fact = dict(fact_counts)
 
+    # 5. Check stage DB record for stage_id and early completion flag
+    from ...db.models import Stage  # noqa: PLC0415
+    db_stage = db.query(Stage).filter(Stage.name == resolved_stage).first()
+    stage_id = db_stage.id if db_stage else (active_row.stage_id if active_row else None)
+    is_completed = db_stage.is_completed if db_stage else (active_row.is_completed if active_row else False)
+
     # 5. Evaluate compliance
-    if preset in ("norm", "normal"):
+    if is_completed:
+        status = IncidentStatus.OK
+        explanation = (
+            f"Этап «{resolved_stage}» завершен досрочно (подтверждено КС-2). "
+            "Нормативные требования к технике сняты."
+        )
+        response = AnalyzeResponse(
+            timestamp=datetime.combine(target_date, datetime.min.time()),
+            active_stage=resolved_stage,
+            stage_name=resolved_stage,
+            detections=detections,
+            status=status,
+            compliance_status=status,
+            explanation=explanation,
+            missing_machinery=[],
+            unexpected_machinery=[],
+            observation_quality=ObservationQuality.HIGH,
+            model_is_construction_specific=detector.model_is_construction,
+            detected_date=detected_date_str,
+            analyzed_date=detected_date_str,
+            stage_planned_period=stage_planned_period,
+            machinery_plan=machinery_plan,
+            machinery_fact=machinery_fact,
+            delay_days=0,
+            penalty_rub=0,
+            is_stage_completed=True,
+            stage_id=stage_id,
+        )
+    elif preset in ("norm", "normal"):
         resolved_stage = (
             resolved_stage
             if resolved_stage not in ("Вне графика СМР", "Вне этапов СМР")
@@ -344,6 +379,10 @@ async def _process_analysis_pipeline(
             stage_planned_period=stage_planned_period or {"start": "2026-09-01", "end": "2026-09-12"},
             machinery_plan=machinery_plan,
             machinery_fact=machinery_fact,
+            delay_days=0,
+            penalty_rub=0,
+            is_stage_completed=False,
+            stage_id=stage_id,
         )
     elif preset in ("critical", "violation"):
         resolved_stage = (
@@ -378,6 +417,10 @@ async def _process_analysis_pipeline(
             stage_planned_period=stage_planned_period or {"start": "2026-09-15", "end": "2026-10-05"},
             machinery_plan=machinery_plan,
             machinery_fact=machinery_fact,
+            delay_days=2,
+            penalty_rub=700000,
+            is_stage_completed=False,
+            stage_id=stage_id,
         )
     elif active_row is None and not cleaned_stage:
         status = IncidentStatus.WARNING
@@ -398,6 +441,10 @@ async def _process_analysis_pipeline(
             stage_planned_period=stage_planned_period,
             machinery_plan=machinery_plan,
             machinery_fact=machinery_fact,
+            delay_days=1,
+            penalty_rub=50000,
+            is_stage_completed=False,
+            stage_id=stage_id,
         )
     else:
         response = await run_in_threadpool(
@@ -408,6 +455,8 @@ async def _process_analysis_pipeline(
             image_shape=(h, w),
             model_is_real=detector.is_real_model,
             model_is_construction=detector.model_is_construction,
+            is_completed=is_completed,
+            stage_id=stage_id,
         )
         response.detections = detections
         response.detected_date = detected_date_str
@@ -420,6 +469,8 @@ async def _process_analysis_pipeline(
         response.compliance_status = response.status
         response.photo_timestamp = photo_dt
         response.timestamp = datetime.combine(target_date, datetime.min.time())
+        response.stage_id = stage_id
+        response.is_stage_completed = is_completed
 
     # 6. Save annotated preview image in threadpool
     _, annotated_url = await run_in_threadpool(_annotate_and_save, img_array, detections, file_uuid)
@@ -679,7 +730,7 @@ async def get_incident_pdf(incident_id: int, db: Session = Depends(get_db)) -> R
         incident.annotated_image_path,
     )
 
-    filename = f"incident_{incident_id}.pdf"
+    filename = f"akt_dgp_{incident_id}.pdf"
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

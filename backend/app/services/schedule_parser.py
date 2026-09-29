@@ -214,6 +214,8 @@ def parse_schedule_structured(file_bytes: bytes) -> list[ScheduleRow]:
                 machinery_plan=machinery_text,
                 required_machinery={k.value: v for k, v in required.items()},
                 contractor=str(_get(raw, col_map, "contractor") or "").strip() or None,
+                is_completed=False,
+                stage_id=None,
             )
         )
     return rows
@@ -280,7 +282,7 @@ def _find_default_schedule_file() -> Path | None:
 
 
 def save_stages_to_db(rows: list[ScheduleRow]) -> None:
-    """Save or update parsed stages in SQLite build_eye.db."""
+    """Save or update parsed stages in SQLite build_eye.db, synchronizing IDs and completion."""
     try:
         from ..db.models import Stage  # noqa: PLC0415
         from ..db.session import SessionLocal  # noqa: PLC0415
@@ -292,14 +294,20 @@ def save_stages_to_db(rows: list[ScheduleRow]) -> None:
                     existing.date_start = r.date_start
                     existing.date_end = r.date_end
                     existing.machinery_plan = r.machinery_plan or ""
+                    r.stage_id = existing.id
+                    r.is_completed = existing.is_completed
                 else:
                     st = Stage(
                         name=r.stage_name,
                         date_start=r.date_start,
                         date_end=r.date_end,
                         machinery_plan=r.machinery_plan or "",
+                        is_completed=r.is_completed,
                     )
                     db.add(st)
+                    db.flush()
+                    r.stage_id = st.id
+                    r.is_completed = st.is_completed
             db.commit()
             logger.debug("Persisted %d stages to database", len(rows))
     except Exception as exc:
@@ -322,6 +330,8 @@ def load_stages_from_db() -> list[ScheduleRow]:
                 rows.append(
                     ScheduleRow(
                         index=idx,
+                        stage_id=s.id,
+                        is_completed=s.is_completed,
                         stage_name=s.name,
                         date_start=s.date_start,
                         date_end=s.date_end,
@@ -333,6 +343,29 @@ def load_stages_from_db() -> list[ScheduleRow]:
     except Exception as exc:
         logger.warning("Could not load stages from DB fallback: %s", exc)
         return []
+
+
+def toggle_stage_completion(stage_id: int, db: Any) -> tuple[int, bool, str]:
+    """Toggle is_completed for a stage in DB and update the in-memory loaded schedule."""
+    from ..db.models import Stage  # noqa: PLC0415
+
+    stage = db.query(Stage).filter(Stage.id == stage_id).first()
+    if not stage:
+        raise ValueError(f"Stage with ID {stage_id} not found in database")
+
+    stage.is_completed = not stage.is_completed
+    db.commit()
+    db.refresh(stage)
+
+    # Synchronize in-memory schedule
+    with _schedule_lock:
+        for r in _loaded_schedule:
+            if r.stage_id == stage_id or r.stage_name == stage.name:
+                r.is_completed = stage.is_completed
+                r.stage_id = stage.id
+
+    logger.info("Stage %d (%s) toggled: is_completed=%s", stage.id, stage.name, stage.is_completed)
+    return stage.id, stage.is_completed, stage.name
 
 
 def init_default_schedule() -> list[ScheduleRow]:

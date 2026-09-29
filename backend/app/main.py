@@ -31,6 +31,7 @@ Base.metadata.create_all(bind=engine)
 # Auto-migrate new columns for existing SQLite/Postgres tables
 with engine.begin() as conn:
     for table, col in [
+        ("stages", "is_completed BOOLEAN NOT NULL DEFAULT 0"),
         ("incident_alerts", "raw_image_path VARCHAR(512)"),
         ("incident_alerts", "annotated_image_path VARCHAR(512)"),
         ("machinery_detections", "raw_image_path VARCHAR(512)"),

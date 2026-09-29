@@ -5,14 +5,18 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from sqlalchemy.orm import Session
 
+from ...db.session import get_db
 from ...schemas.contracts import ScheduleRow, ScheduleUploadResponse
 from ...services.ontology import get_all_stage_names, load_schedule_rules
 from ...services.schedule_parser import (
     get_active_stages,
+    get_loaded_schedule,
     parse_schedule_structured,
     set_loaded_schedule,
+    toggle_stage_completion,
 )
 
 router = APIRouter(prefix="/schedule", tags=["schedule"])
@@ -86,3 +90,29 @@ async def list_stages() -> list[str]:
     If a schedule has been uploaded, its stages appear first.
     """
     return get_all_stage_names()
+
+
+@router.get("/stages/details", response_model=list[ScheduleRow])
+async def list_stages_details() -> list[ScheduleRow]:
+    """Return full list of loaded ScheduleRows including stage_id and is_completed."""
+    return get_loaded_schedule()
+
+
+@router.patch("/stages/{stage_id}/toggle-completed")
+async def toggle_stage_completed(
+    stage_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    """Toggle the is_completed flag for a stage in SQLite DB and memory cache."""
+    try:
+        sid, is_completed, stage_name = toggle_stage_completion(stage_id, db)
+        return {
+            "stage_id": sid,
+            "is_completed": is_completed,
+            "stage_name": stage_name,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Error toggling stage %d completion: %s", stage_id, exc)
+        raise HTTPException(status_code=500, detail="Internal database error") from exc

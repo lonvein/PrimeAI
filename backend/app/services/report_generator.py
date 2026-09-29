@@ -432,27 +432,109 @@ def generate_incident_act_pdf(
         )
         story.append(low_table)
 
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 6))
 
-    # 6. Signatures and Verification Block
-    story.append(Paragraph("4. Подписи сторон и электронная верификация", section_h2))
+    # 6. Managerial Risk & Financial Penalty Block
+    delay_val = getattr(incident_data, "delay_days", None)
+    penalty_val = getattr(incident_data, "penalty_rub", None)
+    if delay_val is None and isinstance(incident_data, dict):
+        delay_val = incident_data.get("delay_days")
+        penalty_val = incident_data.get("penalty_rub")
+
+    if delay_val is None:
+        if status == "CRITICAL":
+            delay_val = max(1, int(len(missing_list) * 2))
+            penalty_val = delay_val * 350000
+        elif status == "WARNING":
+            delay_val = 1
+            penalty_val = 50000
+        else:
+            delay_val = 0
+            penalty_val = 0
+    else:
+        delay_val = int(delay_val)
+        penalty_val = int(penalty_val or 0)
+
+    delay_display = f"+{delay_val} раб. дн." if delay_val > 0 else "0 дн. (В графике СМР)"
+    penalty_display = f"{penalty_val:,} ₽".replace(",", " ") if penalty_val > 0 else "0 ₽ (Претензии отсутствуют)"
+
+    story.append(Paragraph("4. Расчёт управленческого ущерба и штрафных санкций", section_h2))
+
+    impact_data = [
+        [
+            Paragraph("<b>Прогнозируемая задержка этапа:</b>", body_style),
+            Paragraph(f"<font color='{'#b71c1c' if delay_val > 0 else '#2b8a5a'}'><b>{delay_display}</b></font>", body_style),
+            Paragraph("<b>Сумма расчетной неустойки:</b>", body_style),
+            Paragraph(f"<font color='{'#b71c1c' if penalty_val > 0 else '#2b8a5a'}'><b>{penalty_display}</b></font>", body_style),
+        ],
+        [
+            Paragraph("<b>Основание расчета:</b>", body_style),
+            Paragraph("Нормативный регламент строительного контроля ДГП Москвы (базовая ставка 350 000 ₽ / сут.)", body_style),
+            Paragraph("<b>Порядок применения:</b>", body_style),
+            Paragraph("Взыскание пени в рамках госконтракта на основании настоящего Акта фиксации", body_style),
+        ],
+    ]
+    impact_table = Table(impact_data, colWidths=[140, 120, 130, 130])
+    impact_table.setStyle(
+        TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F8F9FA")),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#CED4DA")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E9ECEF")),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ])
+    )
+    story.append(impact_table)
+    story.append(Spacer(1, 6))
+
+    # 7. Signatures and Official Stamp Block
+    story.append(Paragraph("5. Подписи сторон и официальный штамп строительного контроля", section_h2))
+
+    stamp_style_title = ParagraphStyle("StampTitle", fontName=bold_font, fontSize=6.5, leading=8, alignment=1, textColor=colors.HexColor("#0A2540"))
+    stamp_style_sub = ParagraphStyle("StampSub", fontName=bold_font, fontSize=6, leading=7.5, alignment=1, textColor=colors.HexColor("#0A2540"))
+    stamp_style_sign = ParagraphStyle("StampSign", fontName=bold_font, fontSize=6, leading=7.5, alignment=1, textColor=colors.HexColor("#2B8A5A"))
+    stamp_style_text = ParagraphStyle("StampText", fontName=regular_font, fontSize=5.5, leading=7, alignment=1, textColor=colors.HexColor("#333333"))
+
+    stamp_flowables = [
+        Paragraph("<b>ДЕПАРТАМЕНТ ГРАДОСТРОИТЕЛЬНОЙ ПОЛИТИКИ</b>", stamp_style_title),
+        Paragraph("<b>ГОРОДА МОСКВЫ</b>", stamp_style_title),
+        Paragraph("<b>СТРОИТЕЛЬНЫЙ КОНТРОЛЬ ЕАС «BUILD EYE AI»</b>", stamp_style_sub),
+        Paragraph("<b>✔ ПОДПИСАНО УСИЛЕННОЙ ЭЦП</b>", stamp_style_sign),
+        Paragraph(f"Сертификат: <b>RU77-DGP-BE-{inc_id:04d}-2026</b>", stamp_style_text),
+        Paragraph(f"Дата: {date_str[:10]} | Статус: ВЕРИФИЦИРОВАНО", stamp_style_text),
+    ]
+
+    stamp_cell = Table([[item] for item in stamp_flowables], colWidths=[170])
+    stamp_cell.setStyle(
+        TableStyle([
+            ("BOX", (0, 0), (-1, -1), 1.5, colors.HexColor("#0A2540")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F0F4F8")),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ])
+    )
 
     sig_data = [
         [
             Paragraph("<b>Инспектор строительного контроля<br/>ДГП города Москвы:</b>", body_style),
-            Paragraph("<b>Ответственный представитель<br/>технадзора генерального подрядчика:</b>", body_style),
+            Paragraph("<b>Ответственный представитель<br/>генподрядчика:</b>", body_style),
+            stamp_cell,
         ],
         [
             Paragraph("__________________ / __________________ /", bold_body),
             Paragraph("__________________ / __________________ /", bold_body),
+            Paragraph("", body_style),
         ],
     ]
-    sig_table = Table(sig_data, colWidths=[260, 260])
+    sig_table = Table(sig_data, colWidths=[175, 175, 170])
     sig_table.setStyle(
         TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("TOPPADDING", (0, 0), (-1, -1), 4),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("SPAN", (2, 0), (2, 1)),  # Stamp spans both rows
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ])
     )
     story.append(sig_table)

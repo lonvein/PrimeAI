@@ -172,10 +172,51 @@ const planFactRows = computed(() => {
   })
 })
 
-function downloadPdf() {
+const isTogglingStage = ref(false)
+const isDownloadingPdf = ref(false)
+
+async function handleToggleStageCompletion() {
+  const stageId = analysis.value?.stage_id
+  if (!stageId) return
+  isTogglingStage.value = true
+  errorMessage.value = ''
+  try {
+    await api.patch(`/schedule/stages/${stageId}/toggle-completed`)
+    // Refresh analysis immediately
+    if (localFile.value) {
+      await runAnalysis(localFile.value, selectedDate.value)
+    } else {
+      const currentPreset = analysis.value?.status === 'CRITICAL' ? 'critical' : 'norm'
+      const { data } = await api.post(`/analyze-preset?preset_type=${currentPreset}&selected_date=${selectedDate.value}`)
+      analysis.value = data
+    }
+  } catch (err) {
+    errorMessage.value = 'Ошибка изменения статуса этапа: ' + (err.response?.data?.detail || err.message || err)
+  } finally {
+    isTogglingStage.value = false
+  }
+}
+
+async function downloadPdf() {
   const id = analysis.value?.incident_id
   if (!id) return
-  window.open(`/api/v1/monitoring/incidents/${id}/pdf`, '_blank')
+  isDownloadingPdf.value = true
+  try {
+    const response = await api.get(`/monitoring/incidents/${id}/pdf`, { responseType: 'blob' })
+    const blob = new Blob([response.data], { type: 'application/pdf' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `akt_dgp_${id}.pdf`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  } catch (err) {
+    errorMessage.value = 'Ошибка при формировании PDF-акта: ' + (err.response?.data?.detail || err.message || err)
+  } finally {
+    isDownloadingPdf.value = false
+  }
 }
 
 onMounted(() => {
@@ -372,14 +413,55 @@ onMounted(() => {
             {{ analysis.explanation }}
           </p>
 
+          <!-- Business Impact Block (Delay & Penalties) -->
+          <div class="business-impact-grid">
+            <div class="impact-chip delay" :class="{ 'on-time': (analysis.delay_days || 0) === 0 }">
+              <span class="chip-label">График работ:</span>
+              <strong v-if="(analysis.delay_days || 0) > 0" class="chip-val text-danger">
+                ⚠️ +{{ analysis.delay_days }} раб. дн.
+              </strong>
+              <strong v-else class="chip-val text-success">
+                ✅ В графике (0 дн.)
+              </strong>
+            </div>
+            <div class="impact-chip penalty" :class="{ 'has-penalty': (analysis.penalty_rub || 0) > 0 }">
+              <span class="chip-label">Расчетная неустойка:</span>
+              <strong class="chip-val">
+                💰 {{ (analysis.penalty_rub || 0).toLocaleString('ru-RU') }} ₽
+              </strong>
+            </div>
+          </div>
+
+          <!-- Early completion toggle button -->
+          <div v-if="analysis.stage_id" class="stage-actions-box">
+            <button
+              type="button"
+              class="btn-toggle-stage"
+              :class="{ 'is-completed': analysis.is_stage_completed }"
+              :disabled="isTogglingStage"
+              @click="handleToggleStageCompletion"
+              :title="analysis.is_stage_completed ? 'Возобновить контроль по данному этапу' : 'Подтвердить досрочную сдачу работ по форме КС-2'"
+            >
+              <span v-if="isTogglingStage">⏳ Обновление...</span>
+              <span v-else-if="analysis.is_stage_completed">↩️ Возобновить этап (КС-2 отозвано)</span>
+              <span v-else>✔️ Завершить этап досрочно (подтверждено КС-2)</span>
+            </button>
+            <span v-if="analysis.is_stage_completed" class="stage-completed-note">
+              ✓ Требования сняты в связи с досрочной сдачей
+            </span>
+          </div>
+
           <!-- 1-Click PDF Act Generation Button -->
           <div v-if="analysis.incident_id || analysis.status === 'WARNING' || analysis.status === 'CRITICAL'" class="act-btn-container">
             <button
               class="btn-act-pdf"
+              :disabled="isDownloadingPdf"
               @click="downloadPdf"
               title="Сформировать официальный юридически значимый Акт фиксации нарушений ДГП Москвы в формате PDF"
             >
-              📄 Сформировать Акт нарушений (PDF)
+              <span v-if="isDownloadingPdf">⏳</span>
+              <span v-else>📄</span>
+              {{ isDownloadingPdf ? 'Формирование PDF-Акта...' : 'Сформировать Акт нарушений (PDF)' }}
             </button>
             <span class="act-hint">Официальный документ со штампом ДГП г. Москвы и фотофиксацией</span>
           </div>
@@ -818,5 +900,75 @@ onMounted(() => {
   font-size: 0.72rem;
   color: #64748b;
   text-align: center;
+}
+
+/* Business Impact */
+.business-impact-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.impact-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.chip-label {
+  font-size: 0.68rem;
+  color: #64748b;
+  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.chip-val {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #1e293b;
+}
+.text-danger { color: #b91c1c; }
+.text-success { color: #15803d; }
+.has-penalty .chip-val { color: #b91c1c; }
+
+/* Stage Actions */
+.stage-actions-box {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 0.75rem;
+}
+.btn-toggle-stage {
+  background: #2563eb;
+  color: white;
+  border: none;
+  padding: 0.45rem 0.8rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  align-self: flex-start;
+}
+.btn-toggle-stage:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+.btn-toggle-stage.is-completed {
+  background: #475569;
+}
+.btn-toggle-stage.is-completed:hover:not(:disabled) {
+  background: #334155;
+}
+.btn-toggle-stage:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.stage-completed-note {
+  font-size: 0.72rem;
+  color: #15803d;
+  font-weight: 600;
 }
 </style>

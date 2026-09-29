@@ -105,6 +105,11 @@ class AnalyzeResponse(BaseModel):
     machinery_fact: dict[str, int] = Field(default_factory=dict)
     # Compliance status alias (OK, WARNING, CRITICAL)
     compliance_status: IncidentStatus | None = None
+    # Financial impact & managerial risk metrics (DGP Moscow standards)
+    delay_days: int = 0
+    penalty_rub: int = 0
+    is_stage_completed: bool = False
+    stage_id: int | None = None
 
 
 class BatchAnalyzeResponse(BaseModel):
@@ -130,6 +135,8 @@ class ScheduleRow(BaseModel):
     """One row from the uploaded Excel schedule."""
 
     index: int
+    stage_id: int | None = None
+    is_completed: bool = False
     stage_name: str
     zone: str | None = None
     date_start: datetime | None = None

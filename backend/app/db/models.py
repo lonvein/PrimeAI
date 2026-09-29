@@ -11,7 +11,7 @@ Changes from initial version:
 import json
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .session import Base
@@ -34,6 +34,7 @@ class Stage(Base):
     date_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Raw text of normative machinery plan from Excel
     machinery_plan: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     detections: Mapped[list["MachineryDetection"]] = relationship(
         "MachineryDetection", back_populates="stage", lazy="select"

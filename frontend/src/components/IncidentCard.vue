@@ -1,5 +1,8 @@
 <script setup>
-defineProps({
+import { ref } from 'vue'
+import { api } from '../services/api'
+
+const props = defineProps({
   status: { type: String, default: 'OK' },
   explanation: { type: String, default: 'Загрузите снимок для анализа.' },
   missingMachinery: { type: Array, default: () => [] },
@@ -8,7 +11,14 @@ defineProps({
   cameraRecommendation: { type: String, default: '' },
   modelIsConstructionSpecific: { type: Boolean, default: false },
   incidentId: { type: [Number, String], default: null },
+  delayDays: { type: Number, default: 0 },
+  penaltyRub: { type: Number, default: 0 },
+  isStageCompleted: { type: Boolean, default: false },
+  stageId: { type: [Number, String], default: null },
+  stageName: { type: String, default: '' },
 })
+
+const emit = defineEmits(['stage-toggled', 'download-pdf'])
 
 const qualityMeta = {
   HIGH: {
@@ -32,10 +42,48 @@ const statusLabels = {
   WAITING: '⏳ Ожидание анализа',
 }
 
-const downloadPdf = (id) => {
-  if (!id) return
-  const url = `/api/v1/monitoring/incidents/${id}/pdf`
-  window.open(url, '_blank')
+const isToggling = ref(false)
+const isDownloadingPdf = ref(false)
+const toggleError = ref('')
+
+async function toggleCompleted() {
+  if (!props.stageId) return
+  isToggling.value = true
+  toggleError.value = ''
+  try {
+    const { data } = await api.patch(`/schedule/stages/${props.stageId}/toggle-completed`)
+    emit('stage-toggled', data)
+  } catch (err) {
+    toggleError.value =
+      'Не удалось изменить статус этапа: ' +
+      (err.response?.data?.detail || err.message || err)
+  } finally {
+    isToggling.value = false
+  }
+}
+
+async function downloadPdfAct() {
+  if (!props.incidentId) return
+  isDownloadingPdf.value = true
+  try {
+    const response = await api.get(`/monitoring/incidents/${props.incidentId}/pdf`, {
+      responseType: 'blob',
+    })
+    const blob = new Blob([response.data], { type: 'application/pdf' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `akt_dgp_${props.incidentId}.pdf`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    emit('download-pdf', props.incidentId)
+  } catch (err) {
+    console.error('Ошибка при скачивании PDF-акта:', err)
+  } finally {
+    isDownloadingPdf.value = false
+  }
 }
 </script>
 
@@ -56,12 +104,58 @@ const downloadPdf = (id) => {
       <div class="rec-icon">⚠️</div>
       <div class="rec-content">
         <strong>Рекомендация ДГП по ракурсу камеры:</strong>
-        <p>{{ cameraRecommendation || 'Качество ракурса: LOW (дальний план / острый угол съемки с верхнего яруса). Рекомендуется скорректировать угол наклона или переключиться на секторную камеру въезда №2.' }}</p>
+        <p>
+          {{
+            cameraRecommendation ||
+            'Качество ракурса: LOW (дальний план / острый угол съемки с верхнего яруса). Рекомендуется скорректировать угол наклона или переключиться на секторную камеру въезда №2.'
+          }}
+        </p>
       </div>
     </div>
 
     <p class="explanation">{{ explanation }}</p>
 
+    <!-- Business Impact block (Delay & Penalties) -->
+    <div v-if="status !== 'WAITING'" class="business-impact-block">
+      <div class="impact-item delay" :class="{ 'in-schedule': delayDays === 0 }">
+        <span class="impact-label">График работ:</span>
+        <strong v-if="delayDays > 0" class="impact-value delay-val">
+          ⚠️ Прогнозируемый срыв: +{{ delayDays }} раб. дн.
+        </strong>
+        <strong v-else class="impact-value ok-val">
+          ✅ В графике (0 дн.)
+        </strong>
+      </div>
+
+      <div class="impact-item penalty" :class="{ 'has-penalty': penaltyRub > 0 }">
+        <span class="impact-label">Финансовые риски:</span>
+        <strong class="impact-value penalty-val">
+          💰 Сумма неустойки: {{ (penaltyRub || 0).toLocaleString('ru-RU') }} ₽
+        </strong>
+      </div>
+    </div>
+
+    <!-- Early Completion Control -->
+    <div v-if="stageId" class="stage-control-block">
+      <button
+        type="button"
+        class="toggle-stage-btn"
+        :class="{ completed: isStageCompleted }"
+        :disabled="isToggling"
+        @click="toggleCompleted"
+        :title="isStageCompleted ? 'Возобновить контроль по данному этапу' : 'Подтвердить досрочную сдачу работ по форме КС-2'"
+      >
+        <span v-if="isToggling">⏳ Обновление статуса...</span>
+        <span v-else-if="isStageCompleted">↩️ Возобновить этап (КС-2 отозвано)</span>
+        <span v-else>✔️ Завершить этап досрочно (подтверждено КС-2)</span>
+      </button>
+      <span v-if="isStageCompleted" class="completed-hint">
+        ✓ Этап закрыт досрочно: нормативные требования к технике сняты
+      </span>
+      <p v-if="toggleError" class="toggle-err">{{ toggleError }}</p>
+    </div>
+
+    <!-- Machinery Missing/Unexpected tags -->
     <div v-if="missingMachinery.length" class="machinery-section missing">
       <span class="section-label">Не хватает:</span>
       <span v-for="m in missingMachinery" :key="m" class="tag missing-tag">{{ m }}</span>
@@ -73,11 +167,18 @@ const downloadPdf = (id) => {
     </div>
 
     <!-- 1-Click PDF Act generation button for DGP -->
-    <div v-if="(status === 'WARNING' || status === 'CRITICAL') && incidentId" class="act-actions">
-      <button class="pdf-btn" @click="downloadPdf(incidentId)" title="Сформировать юридически значимый Акт фиксации нарушений ДГП Москвы">
-        📄 Сформировать Акт для ДГП (PDF)
+    <div v-if="(status === 'WARNING' || status === 'CRITICAL' || incidentId) && incidentId" class="act-actions">
+      <button
+        class="pdf-btn"
+        :disabled="isDownloadingPdf"
+        @click="downloadPdfAct"
+        title="Сформировать юридически значимый Акт фиксации нарушений ДГП Москвы"
+      >
+        <span v-if="isDownloadingPdf">⏳</span>
+        <span v-else>📄</span>
+        {{ isDownloadingPdf ? 'Формирование PDF-Акта...' : 'Сформировать Акт для ДГП (PDF)' }}
       </button>
-      <span class="pdf-hint">Официальный Акт строительного контроля с фотофиксацией и таблицей План-Факт</span>
+      <span class="pdf-hint">Официальный Акт строительного контроля со штампом ЭЦП и фотофиксацией</span>
     </div>
 
     <p v-if="!modelIsConstructionSpecific && status !== 'WAITING'" class="model-note">
@@ -168,6 +269,92 @@ const downloadPdf = (id) => {
   color: #333;
 }
 
+/* Business Impact block */
+.business-impact-block {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  background: #f8faf9;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+.impact-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.impact-label {
+  font-size: 0.75rem;
+  color: #64748b;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.impact-value {
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+.delay-val {
+  color: #b91c1c;
+}
+.ok-val {
+  color: #15803d;
+}
+.penalty-val {
+  color: #1e293b;
+}
+.has-penalty .penalty-val {
+  color: #b91c1c;
+}
+
+/* Stage Control */
+.stage-control-block {
+  margin-bottom: 1rem;
+  padding: 0.6rem 0.8rem;
+  background: #f1f5f9;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.toggle-stage-btn {
+  background: #2563eb;
+  color: #ffffff;
+  border: none;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  align-self: flex-start;
+  transition: background 0.2s;
+}
+.toggle-stage-btn:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+.toggle-stage-btn.completed {
+  background: #64748b;
+}
+.toggle-stage-btn.completed:hover:not(:disabled) {
+  background: #475569;
+}
+.toggle-stage-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.completed-hint {
+  font-size: 0.78rem;
+  color: #15803d;
+  font-weight: 600;
+}
+.toggle-err {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #b91c1c;
+}
+
 .machinery-section {
   display: flex;
   align-items: center;
@@ -215,9 +402,13 @@ const downloadPdf = (id) => {
   transition: background 0.2s, transform 0.1s;
   box-shadow: 0 2px 4px rgba(10, 37, 64, 0.2);
 }
-.pdf-btn:hover {
+.pdf-btn:hover:not(:disabled) {
   background: #153965;
   transform: translateY(-1px);
+}
+.pdf-btn:disabled {
+  opacity: 0.7;
+  cursor: wait;
 }
 .pdf-btn:active {
   transform: translateY(0);

@@ -49,6 +49,8 @@ def evaluate_compliance(
     image_shape: tuple[int, int] | None = None,
     model_is_real: bool = True,
     model_is_construction: bool = True,
+    is_completed: bool = False,
+    stage_id: int | None = None,
 ) -> AnalyzeResponse:
     """Compare detected machinery counts with the active stage requirements.
 
@@ -129,7 +131,17 @@ def evaluate_compliance(
         observation_quality = ObservationQuality.MEDIUM
 
     # --- Determine status and explanation ---
-    if not model_is_real:
+    if is_completed:
+        status = IncidentStatus.OK
+        delay_days = 0
+        penalty_rub = 0
+        explanation = (
+            f"Этап «{rules.stage_name}» завершен досрочно (подтверждено КС-2). "
+            "Нормативные требования к технике сняты."
+        )
+        missing = []
+        unexpected = []
+    elif not model_is_real:
         # Synthetic fallback — cannot make any real assessment.
         status = IncidentStatus.WARNING
         explanation = (
@@ -163,7 +175,6 @@ def evaluate_compliance(
         )
     elif missing and not model_is_construction:
         # Generic COCO model — cannot detect most construction classes.
-        # Do NOT escalate to CRITICAL because absence of detection ≠ absence of equipment.
         observed_str = (
             f"На снимке обнаружено: {', '.join(c.value for c in normalized)}."
             if normalized
@@ -191,13 +202,29 @@ def evaluate_compliance(
             "План-факт соответствует нормативному составу, признаков задержки по технике нет."
         )
 
+    # --- Financial penalty and schedule delay calculation ---
+    if is_completed:
+        delay_days = 0
+        penalty_rub = 0
+    elif status == IncidentStatus.CRITICAL:
+        delay_days = max(1, int(len(missing) * 2))
+        penalty_rub = delay_days * 350000
+    elif status == IncidentStatus.WARNING:
+        delay_days = 1
+        penalty_rub = 50000
+    else:
+        delay_days = 0
+        penalty_rub = 0
+
     logger.info(
-        "Compliance result: stage=%r  status=%s  quality=%s  missing=%s  unexpected=%s",
+        "Compliance result: stage=%r  status=%s  quality=%s  missing=%s  unexpected=%s  delay=%dd  penalty=%d rub",
         rules.stage_name,
         status.value,
         observation_quality.value,
         missing,
         unexpected,
+        delay_days,
+        penalty_rub,
     )
 
     return AnalyzeResponse(
@@ -205,12 +232,17 @@ def evaluate_compliance(
         active_stage=rules.stage_name,
         detections=[],  # filled by caller from detector output
         status=status,
+        compliance_status=status,
         explanation=explanation,
         missing_machinery=missing,
         unexpected_machinery=unexpected,
         observation_quality=observation_quality,
         camera_recommendation=camera_recommendation,
         model_is_construction_specific=model_is_construction,
+        delay_days=delay_days,
+        penalty_rub=penalty_rub,
+        is_stage_completed=is_completed,
+        stage_id=stage_id,
     )
 
 
