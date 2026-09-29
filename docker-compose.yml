@@ -13,6 +13,7 @@ services:
       STATIC_DIR: /app/backend/static
     volumes:
       - ./backend/static:/app/backend/static
+      - ./MSC_lct/График_шаблон.xlsx:/app/MSC_lct/График_шаблон.xlsx:ro
       - backend_data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
@@ -25,7 +26,7 @@ services:
       context: .
       dockerfile: frontend/Dockerfile.frontend
     ports:
-      - "5173:80"
+      - "80:80"
     depends_on:
       backend:
         condition: service_healthy
