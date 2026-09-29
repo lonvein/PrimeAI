@@ -13,7 +13,11 @@ Key features:
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
+
+# Disable Ultralytics autoinstall of onnxruntime-gpu when using CPU onnxruntime
+os.environ.setdefault("YOLO_AUTOINSTALL", "False")
 
 import cv2
 import numpy as np
@@ -292,7 +296,7 @@ def annotate_image(image: np.ndarray, detections: list) -> np.ndarray:
 
 
 class MachineryDetector:
-    """Lightweight construction machinery detector using specialized YOLO weights."""
+    """Lightweight construction machinery detector using specialized ONNX or PyTorch weights."""
 
     def __init__(
         self,
@@ -301,20 +305,50 @@ class MachineryDetector:
         iou: float | None = 0.45,
     ) -> None:
         settings = get_settings()
-        self.weights_path = Path(weights_path or settings.yolo_weights)
-        self.confidence = confidence if confidence is not None else settings.yolo_confidence
-        self.iou = iou
+        target_path = Path(weights_path) if weights_path else Path(settings.yolo_weights)
+
+        # Automatic fallback from .onnx to .pt if .onnx file is missing
+        if target_path.suffix.lower() == ".onnx" and not target_path.is_file():
+            fallback_pt = (
+                settings.model_pt_path
+                if hasattr(settings, "model_pt_path") and settings.model_pt_path.is_file()
+                else Path("backend/models/best.pt")
+            )
+            if fallback_pt.is_file():
+                logger.warning(
+                    "ONNX model not found at %s. Falling back to PyTorch weights: %s",
+                    target_path,
+                    fallback_pt,
+                )
+                target_path = fallback_pt
+            else:
+                logger.warning("Neither ONNX (%s) nor PyTorch fallback (%s) found.", target_path, fallback_pt)
+
+        self.weights_path = target_path
+        self.confidence = confidence if confidence is not None else 0.35
+        self.iou = iou if iou is not None else 0.45
         self.imgsz = 640
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        self.is_onnx = self.weights_path.suffix.lower() == ".onnx"
         self._model = None
         self._load_error: Exception | None = None
         self._is_construction: bool = False
+
+        if self.is_onnx:
+            self.device = "cpu"
+        else:
+            self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
         if self.weights_path.is_file():
             try:
                 from ultralytics import YOLO  # noqa: PLC0415
 
-                self._model = YOLO(str(self.weights_path))
+                if self.is_onnx:
+                    self._model = YOLO(str(self.weights_path), task="detect")
+                    logger.info("Loaded model: %s (ONNX runtime)", self.weights_path)
+                else:
+                    self._model = YOLO(str(self.weights_path))
+                    logger.info("Loaded model: %s (PyTorch)", self.weights_path)
+
                 # Check if model has domain-specific construction classes
                 matched_classes = sum(
                     1
@@ -323,7 +357,7 @@ class MachineryDetector:
                 )
                 self._is_construction = matched_classes >= 3
                 logger.info(
-                    "YOLO model loaded: %s (classes=%d, is_construction=%s, device=%s, imgsz=%d, conf=%.2f)",
+                    "Detector initialized: %s (classes=%d, is_construction=%s, device=%s, imgsz=%d, conf=%.2f)",
                     self.weights_path.name,
                     len(self._model.names),
                     self._is_construction,
@@ -333,7 +367,7 @@ class MachineryDetector:
                 )
             except Exception as error:  # pragma: no cover
                 self._load_error = error
-                logger.error("Failed to load YOLO weights from %s: %s", self.weights_path, error)
+                logger.error("Failed to load YOLO model from %s: %s", self.weights_path, error)
         else:
             logger.warning(
                 "YOLO weights not found at %s — using synthetic fallback for smoke testing.",
@@ -350,19 +384,33 @@ class MachineryDetector:
         """True when the model is trained on specialized construction equipment."""
         return self._is_construction if self._model is not None else False
 
-    def detect(self, image_bytes: bytes) -> list[DetectionItem]:
+    def detect(
+        self,
+        image_input: bytes | str | Path | np.ndarray,
+    ) -> list[DetectionItem]:
         """Run inference and return validated detections.
 
+        Accepts image as bytes, file path (str or Path), or numpy.ndarray (BGR).
         Guaranteed memory efficiency:
-        - FP16 (half=True) when on GPU.
+        - ONNX inference with onnxruntime.
+        - FP16 (half=True) when on GPU with PyTorch.
         - Automatic torch.cuda.empty_cache() cleanup in finally block.
         - Class-Agnostic NMS (agnostic_nms=True) to avoid duplicate cross-class bounding boxes.
         - Post-processing suppression of nested boxes (suppress_contained_boxes).
         """
         try:
-            image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
-            if image is None:
-                raise ValueError("Uploaded file is not a readable image")
+            if isinstance(image_input, bytes):
+                image = cv2.imdecode(np.frombuffer(image_input, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if image is None:
+                    raise ValueError("Uploaded file is not a readable image")
+            elif isinstance(image_input, (str, Path)):
+                image = cv2.imread(str(image_input))
+                if image is None:
+                    raise ValueError(f"Could not read image from path: {image_input}")
+            elif isinstance(image_input, np.ndarray):
+                image = image_input
+            else:
+                raise TypeError(f"Unsupported image input type: {type(image_input)}")
 
             if self._model is None:
                 logger.info("Synthetic fallback active — returning placeholder excavator.")
@@ -377,7 +425,7 @@ class MachineryDetector:
                 "device": self.device,
                 "verbose": False,
             }
-            if self.device.startswith("cuda"):
+            if not self.is_onnx and self.device.startswith("cuda"):
                 predict_kwargs["half"] = True
 
             result = self._model.predict(**predict_kwargs)[0]

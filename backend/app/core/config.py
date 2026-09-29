@@ -6,15 +6,22 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+MODEL_ONNX_PATH: Path = Path("backend/models/best.onnx")
+MODEL_PT_PATH: Path = Path("backend/models/best.pt")
+YOLO_WEIGHTS: str = str(MODEL_ONNX_PATH if MODEL_ONNX_PATH.exists() else MODEL_PT_PATH)
+
+
 class Settings(BaseSettings):
     """Runtime settings for API, storage, and model inference."""
 
     app_name: str = "Build Eye AI"
     debug: bool = True
-    # Default points to the actual file that exists.
+    # Priority given to ONNX, fallback to .pt if not present.
     # Override via .env: YOLO_WEIGHTS=ml/weights/best_construction.pt
     database_url: str = "sqlite:///./build_eye.db"
-    yolo_weights: Path = Path("backend/models/best.pt")
+    model_onnx_path: Path = MODEL_ONNX_PATH
+    model_pt_path: Path = MODEL_PT_PATH
+    yolo_weights: Path = Path(YOLO_WEIGHTS)
     yolo_confidence: float = 0.25
     static_dir: Path = Path("backend/static")
 

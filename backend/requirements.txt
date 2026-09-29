@@ -8,6 +8,8 @@ openpyxl
 torch
 torchvision
 ultralytics
+onnxruntime>=1.17.0
+onnx>=1.15.0
 opencv-python-headless
 python-multipart
 sqlalchemy
